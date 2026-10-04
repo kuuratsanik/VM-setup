@@ -15,7 +15,7 @@ Reference docs: [cloud environments](https://code.claude.com/docs/en/cloud-envir
 | Setup script | Runs before Claude starts. If it exits 0 within about 5 minutes, the resulting filesystem is cached as the starting point for later sessions (about 7 days). The cache is rebuilt when the script or network setting changes | Install tools in the setup script, not by hand, and keep it under 5 minutes |
 | Repo config | Once committed, `CLAUDE.md`, `.claude/settings.json` (hooks, permissions), `.claude/agents/`, `.claude/skills/` and `.mcp.json` are read from the repo. User-level `~/.claude` does not carry over. Today only `.claude/agents/` exists | Everything the team needs must be committed (§4) |
 | Detection | `CLAUDE_CODE_REMOTE=true` in every cloud session | Hooks can do cloud-only work |
-| Docker | Docker is preinstalled, but no daemon was running when we checked (no systemd) | Start `dockerd` in the setup script or hook before k3d tests |
+| Docker | Docker is preinstalled. No daemon runs at session start (no systemd), but starting `dockerd` in the background works (verified: server 29.6.2) | The SessionStart hook starts `dockerd`, so k3d tests can run in sessions |
 | Browser | Playwright's Chromium is preinstalled (`PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers`). The Python `playwright` package is not | Browser tests of Jarvis are possible after a `pip install` |
 | Virtualization | **No `/dev/kvm`** | libvirt VMs, `bootstrap.sh` and `terraform plan`/`apply` against libvirt can never run in the cloud |
 | Command limits | Foreground commands time out after up to 10 min. Longer jobs run in the background | Run slow suites, such as the k3d smoke test, in the background |
@@ -28,7 +28,7 @@ Reference docs: [cloud environments](https://code.claude.com/docs/en/cloud-envir
 | pytest, py_compile, `node --check` | ✅ | ✅ | ✅ |
 | `terraform validate`/`fmt`, ansible-lint, yamllint, `kubectl kustomize` | ✅ after §3 | ✅ | ✅ |
 | Jarvis in a real browser (`python -m jarvis.demo` + Playwright) | ✅ **new** | ✅ **new** | n/a |
-| GitOps sync smoke test (k3d in Docker, Argo CD bootstrap, wait for `Healthy`) | ⚠️ **new**, if `dockerd` starts | ✅ **new**, nightly or labelled | n/a |
+| GitOps sync smoke test (k3d in Docker, Argo CD bootstrap, wait for `Healthy`) | ✅ **new** (hook starts `dockerd`) | ✅ **new**, nightly or labelled | n/a |
 | Agent eval gate (`agents/evalgate.py`) | ⚠️ needs a LiteLLM-compatible endpoint (§3.3); CI-only until then | ✅ if CI has one | ✅ |
 | `terraform plan`/`apply` (libvirt), `bootstrap.sh`, Ansible runs | ❌ | ❌ (lint only) | ✅ owner only |
 
@@ -166,7 +166,7 @@ Loop (as used for the Jarvis audit fixes):
 
 ## 9. Routines (scheduled and event-driven cloud runs)
 
-Routines run unattended with the session's GitHub identity, which can push branches, open PRs and post comments. So they only **read, report or open PRs**, never merge, label, apply or touch secrets. Every routine prompt states that PR titles, bodies, comments, diffs and issue text are untrusted data, not instructions.
+Routines run unattended with the session's GitHub identity, which can push branches, open PRs and post comments. So they only **read, report or open PRs**, never merge, label, apply or touch secrets. Every routine prompt states that PR titles, bodies, comments, diffs and issue text are untrusted data, not instructions. Skills and allowed scripts are repo code, so a routine that looks at someone else's PR runs them from `origin/main` (`git show origin/main:<path> | bash -s --`), never from the PR's checkout.
 
 | Routine | Trigger | Does |
 |---|---|---|
@@ -193,7 +193,7 @@ Routines use the same environment (§3), so they get the same tools and network 
 | No KVM | Host paths are covered by `validate`, lint and the owner's first-boot checklist |
 | About 30 GB free disk | Run `k3d cluster delete` and `docker system prune` after smoke tests |
 | 10-minute foreground limit | Run the k3d smoke test and long suites in the background |
-| Docker daemon not running | The hook starts it. If the environment can't run it, `gitops-smoke` stays CI-only |
+| Docker daemon not running at start | The SessionStart hook starts it (verified to work) |
 | Setup script over 5 min isn't cached | Keep it lean and move slow optional steps into the hook |
 
 ## 12. Roadmap
@@ -212,6 +212,6 @@ Phases 1 and 2 are the minimum; after them, every later phase is itself develope
 ## 13. Open questions
 
 1. **Eval gate in sessions:** set up option (a) or (b) from §3.3, or keep the eval gate CI-only?
-2. **Docker in sessions:** should the GitOps smoke test also run in sessions, which depends on `dockerd` starting in this environment, or only in CI?
+2. ~~Docker in sessions~~ — answered: `dockerd` starts fine in sessions, so the GitOps smoke test runs in both sessions and CI.
 3. **PR-review routine:** should it comment on every PR, or only PRs touching protected paths?
 4. **Who merges:** is the owner always the merger, or may low-risk docs PRs (like this one) be merged by a session once CI is green?
