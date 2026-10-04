@@ -1,6 +1,7 @@
 name: agent-review
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 jobs:
   review:
