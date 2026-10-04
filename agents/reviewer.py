@@ -27,7 +27,8 @@ def main():
         problems.append(f"protected paths changed without the 'human-approved' label: {touched}")
     if any(SECRET_RE.search(line) for line in diff.splitlines() if line.startswith("+")):
         problems.append("possible secret in the diff")
-    if re.search(r"^\+.*(autonomy: L3|dry_run: bool = False)", diff, re.M):
+    # Bracketed so this pattern does not match its own source line in a diff.
+    if re.search(r"^\+.*(autonomy: L[3]|dry_run: bool = Fals[e])", diff, re.M):
         problems.append("raises autonomy or disables dry-run defaults")
 
     summary = ""

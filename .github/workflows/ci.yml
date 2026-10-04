@@ -11,6 +11,7 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
       - run: terraform -chdir=terraform init -backend=false && terraform -chdir=terraform validate
       - run: pip install ansible-lint pyyaml yamllint
+      - run: ansible-galaxy collection install -r ansible/requirements.yml
       - run: ansible-lint ansible/
       - run: yamllint -d relaxed profiles agents
       - run: python -m py_compile detect.py infra-mcp/server.py

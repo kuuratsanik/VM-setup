@@ -9,6 +9,6 @@ apt-get install -y python3 python3-yaml ansible git cpu-checker util-linux
 python3 detect.py "$@"
 [[ "${1:-}" == "--detect-only" ]] && exit 0
 
-ansible-galaxy collection install community.general containers.podman ansible.posix
+ansible-galaxy collection install -r ansible/requirements.yml
 ansible-playbook -i localhost, -c local ansible/site.yml \
   -e @profile.generated.json
