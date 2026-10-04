@@ -10,5 +10,10 @@
 /evals/ @kuuratsanik
 /.github/ @kuuratsanik
 /terraform/ @kuuratsanik
+/gitops/ @kuuratsanik
 /ansible/ @kuuratsanik
+/profiles/ @kuuratsanik
+/scripts/ @kuuratsanik
+/detect.py @kuuratsanik
+/bootstrap.sh @kuuratsanik
 /profile.override.yaml @kuuratsanik

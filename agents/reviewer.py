@@ -6,7 +6,10 @@ import subprocess
 import sys
 
 # Changes here need the 'human-approved' label.
-PROTECTED = ("agents/", "jarvis/", "infra-mcp/", "media-mcp/", "training/", "evals/", ".github/", "ansible/roles/ai_stack/", "ansible/roles/jarvis/", "profile.override.yaml")
+PROTECTED = (
+    "agents/", "jarvis/", "infra-mcp/", "media-mcp/", "training/", "evals/", ".github/", "ansible/", "profile.override.yaml",
+    "terraform/", "gitops/", "profiles/", "detect.py", "bootstrap.sh", "scripts/",
+)
 # Low-risk files: no human label needed, and agent PRs that touch only these may auto-merge (agents/automerge.py).
 TIER0 = ("agents/runbooks/", "proposals/")
 # Safety-critical files: agent-authored PRs (branch agent/*) may never touch these, label or not.
