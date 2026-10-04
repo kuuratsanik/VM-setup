@@ -39,7 +39,13 @@ def main():
     if not cfg["clusters"]:
         sys.exit("no cluster reachable")
     OUT.write_text(yaml.safe_dump(cfg))
-    OUT.chmod(0o600)
+    OUT.chmod(0o640)  # read-only tokens; the jarvis group needs to read it for the Kubernetes MCP server
+    try:
+        import grp
+        import os
+        os.chown(OUT, 0, grp.getgrnam("jarvis").gr_gid)
+    except (KeyError, PermissionError):
+        OUT.chmod(0o600)
     print(f"wrote {OUT} with contexts: {[c['name'] for c in cfg['contexts']]}")
 
 

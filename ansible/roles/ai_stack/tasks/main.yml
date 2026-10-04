@@ -3,20 +3,20 @@
     name: [podman, python3-venv, python3-pip, nodejs, npm, git, gh, rsync]
     state: present
 
-- name: Create state directories
+- name: Create state directories (the two parents are traversable so the jarvis user can reach its own files)
   ansible.builtin.file:
-    path: "{{ item }}"
+    path: "{{ item.path }}"
     state: directory
-    mode: "0750"
+    mode: "{{ item.mode | default('0750') }}"
   loop:
-    - /etc/vmsetup
-    - /var/lib/vmsetup
-    - /var/lib/vmsetup/media
-    - /var/lib/vmsetup/pgdata
-    - /var/lib/vmsetup/localai
-    - /var/lib/vmsetup/hf-cache
-    - /var/lib/vmsetup/phoenix
-    - /var/lib/vmsetup/training
+    - { path: /etc/vmsetup, mode: "0751" }
+    - { path: /var/lib/vmsetup, mode: "0751" }
+    - { path: /var/lib/vmsetup/media }
+    - { path: /var/lib/vmsetup/pgdata }
+    - { path: /var/lib/vmsetup/localai }
+    - { path: /var/lib/vmsetup/hf-cache }
+    - { path: /var/lib/vmsetup/phoenix }
+    - { path: /var/lib/vmsetup/training }
 
 - name: Generate gateway key and database password
   ansible.builtin.set_fact:

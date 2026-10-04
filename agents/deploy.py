@@ -19,6 +19,7 @@ PREV = LIVE.with_name(LIVE.name + ".prev")
 STAGED = LIVE.with_name(LIVE.name + ".staged")
 SYSTEMCTL = os.environ.get("VMSETUP_SYSTEMCTL", "systemctl")
 SERVICE = "vmsetup-agent"
+COMPANIONS = ("jarvis",)  # restarted with the operator so the dashboard runs the same code
 KEEP_FILES = ("profile.generated.json",)  # not in git; .venv is moved separately
 
 
@@ -63,12 +64,19 @@ def swap_in(repo):
         (PREV / ".venv").rename(LIVE / ".venv")
 
 
+def restart_all():
+    result = run(SYSTEMCTL, "restart", SERVICE)
+    for unit in COMPANIONS:
+        run(SYSTEMCTL, "restart", unit)
+    return result
+
+
 def roll_back():
     if (LIVE / ".venv").exists() and PREV.exists():
         (LIVE / ".venv").rename(PREV / ".venv")
     shutil.rmtree(LIVE, ignore_errors=True)
     PREV.rename(LIVE)
-    run(SYSTEMCTL, "restart", SERVICE)
+    restart_all()
 
 
 def main():
@@ -91,7 +99,7 @@ def main():
 
     swap_in(repo)
     pip = run(str(python), "-m", "pip", "install", "-q", "-r", str(LIVE / "agents/requirements.txt"))
-    restart = run(SYSTEMCTL, "restart", SERVICE)
+    restart = restart_all()
     if pip.returncode != 0 or restart.returncode != 0 or not healthy():
         roll_back()
         sys.exit("deploy: new version unhealthy, rolled back")
