@@ -1,0 +1,9 @@
+[Unit]
+Description=Digest agent: one daily summary of what the agents did and what waits for a human
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vm-setup
+EnvironmentFile=-/etc/vmsetup/secrets.env
+ExecStart=/opt/vm-setup/.venv/bin/python /opt/vm-setup/agents/digest.py --quiet-if-idle

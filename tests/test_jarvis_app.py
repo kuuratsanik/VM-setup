@@ -95,3 +95,33 @@ def test_logout_ends_the_session(client):
     assert client.get("/api/models").status_code == 200
     client.post("/api/logout", headers=H)
     assert client.get("/api/models").status_code == 401
+
+
+def test_autonomy_tab_api_lists_approvals_and_breaker(client, tmp_path, monkeypatch):
+    import approvals
+    import policy
+
+    monkeypatch.setattr(policy, "STATE_DIR", tmp_path / "auto")
+    monkeypatch.setattr(approvals, "STATE_DIR", tmp_path / "auto")
+    assert client.get("/api/autonomy").status_code == 401
+    login(client)
+    rid = approvals.queue("vm_stop", "hub-a1", {"domain": "hub-a1"}, {"reason": "policy requires approval"})
+    data = client.get("/api/autonomy").json()
+    assert data["mode"] in ("dry_run", "supervised", "autonomous") and data["audit"]["chain_ok"] is True
+    assert [a["id"] for a in data["approvals"]] == [rid]
+    # No infra MCP server in this test, so confirming must refuse without consuming the request.
+    assert client.post(f"/api/actions/{rid}/confirm", headers=H).status_code == 400
+    assert approvals.get(rid) is not None
+    assert client.post(f"/api/actions/{rid}/discard", headers=H).json() == {"discarded": True}
+    assert client.get("/api/autonomy").json()["approvals"] == []
+
+
+def test_breaker_reset_requires_login_and_is_audited(client, tmp_path, monkeypatch):
+    import policy
+
+    monkeypatch.setattr(policy, "STATE_DIR", tmp_path / "auto")
+    assert client.post("/api/autonomy/breaker/reset", headers=H).status_code == 401
+    login(client)
+    assert client.post("/api/autonomy/breaker/reset", headers=H).json() == {"ok": True}
+    tail = client.get("/api/autonomy").json()["audit_tail"]
+    assert tail[0]["kind"] == "breaker" and tail[0]["action"] == "reset" and tail[0]["actor"] == "owner"

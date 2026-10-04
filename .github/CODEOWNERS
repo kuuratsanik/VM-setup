@@ -1,5 +1,8 @@
 # Changes to these paths need review from the repo owner (enable "Require review from Code Owners" in branch protection).
 /agents/ @kuuratsanik
+# Low-risk tier (auto-merge eligible): no owner, so no required code-owner review
+/agents/runbooks/
+/proposals/
 /infra-mcp/ @kuuratsanik
 /media-mcp/ @kuuratsanik
 /jarvis/ @kuuratsanik

@@ -3,6 +3,7 @@ import json
 import os
 import re
 import subprocess
+import time
 
 from mcp.server.fastmcp import FastMCP
 
@@ -20,9 +21,12 @@ def _allowed_domains():
         return set()
 
 
-def _virsh(*args):
+def _virsh(*args, check=False):
     out = subprocess.run(["virsh", "-c", "qemu:///system", *args], capture_output=True, text=True, timeout=60)
-    return (out.stdout + out.stderr).strip()
+    text = (out.stdout + out.stderr).strip()
+    if check and out.returncode != 0:
+        raise RuntimeError(f"virsh {args[0]} failed: {text[:300]}")  # so callers see isError and the autonomy breaker counts it
+    return text
 
 
 def _check(domain):
@@ -48,24 +52,24 @@ def host_metrics() -> str:
 def vm_snapshot(domain: str, dry_run: bool = True) -> str:
     """Create a snapshot of an allowed guest."""
     _check(domain)
-    name = f"agent-{os.getpid()}"
+    name = f"agent-{int(time.time())}"
     if dry_run:
         return f"dry-run: snapshot {domain} as {name}"
-    return _virsh("snapshot-create-as", domain, name)
+    return _virsh("snapshot-create-as", domain, name, check=True)
 
 
 @mcp.tool()
 def vm_start(domain: str, dry_run: bool = True) -> str:
     """Start an allowed guest."""
     _check(domain)
-    return f"dry-run: start {domain}" if dry_run else _virsh("start", domain)
+    return f"dry-run: start {domain}" if dry_run else _virsh("start", domain, check=True)
 
 
 @mcp.tool()
 def vm_stop(domain: str, dry_run: bool = True) -> str:
     """Gracefully shut down an allowed guest."""
     _check(domain)
-    return f"dry-run: shutdown {domain}" if dry_run else _virsh("shutdown", domain)
+    return f"dry-run: shutdown {domain}" if dry_run else _virsh("shutdown", domain, check=True)
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ const api = async (path, opts = {}) => {
 const getJSON = async (p) => (await api(p)).json();
 const post = async (p, json) => (await api(p, { method: "POST", json: json ?? {} })).json();
 
-const TABS = ["Overview", "Chat", "Compute", "Setup", "Incidents"];
+const TABS = ["Overview", "Chat", "Autonomy", "Compute", "Setup", "Incidents"];
 let current = "Overview";
 
 function showLogin() { $("app").classList.add("hidden"); $("login").classList.remove("hidden"); }
@@ -32,7 +32,7 @@ function buildTabs() {
 function open(t) {
   current = t; buildTabs();
   for (const name of TABS) $("tab-" + name.toLowerCase()).classList.toggle("hidden", name !== t);
-  ({ Overview: renderOverview, Compute: renderCompute, Setup: renderSetup, Incidents: renderIncidents }[t] || (() => {}))();
+  ({ Overview: renderOverview, Autonomy: renderAutonomy, Compute: renderCompute, Setup: renderSetup, Incidents: renderIncidents }[t] || (() => {}))();
 }
 
 async function renderOverview() {
@@ -114,6 +114,26 @@ async function initChat() {
     const prompt = $("msg").value.trim(); if (!prompt) return; $("msg").value = ""; line("user", "image: " + prompt);
     try { const r = await post("/api/image", { prompt }); if (r.b64) log().append(h("img", { class: "gen", src: "data:image/png;base64," + r.b64 })); } catch (e) { line("tool", e.message); }
   });
+}
+
+/* ---- autonomy ---- */
+async function renderAutonomy() {
+  const a = await getJSON("/api/autonomy");
+  const note = h("p", { class: "muted" });
+  const act = (id, verb) => async () => { try { note.textContent = JSON.stringify((await post(`/api/actions/${id}/${verb}`)).result ?? "done"); } catch (e) { note.textContent = e.message; } renderAutonomy(); };
+  $("tab-autonomy").replaceChildren(
+    h("div", { class: "grid" },
+      h("div", { class: "card" }, h("h3", {}, "Mode"), h("div", {}, a.mode), h("div", { class: "muted" }, "Changed only by a reviewed PR to agents/autonomy.yaml"), h("div", { class: "err" }, a.error || "")),
+      h("div", { class: "card" }, h("h3", {}, "Circuit breaker"), h("div", {}, h("span", { class: "dot " + (a.breaker.tripped ? "bad" : "ok") }), a.breaker.tripped ? "tripped: " + a.breaker.reason : "closed"), a.breaker.tripped ? h("button", { onclick: async () => { await post("/api/autonomy/breaker/reset"); renderAutonomy(); } }, "Reset") : ""),
+      h("div", { class: "card" }, h("h3", {}, "Audit log"), h("div", {}, h("span", { class: "dot " + (a.audit.chain_ok ? "ok" : "bad") }), a.audit.chain_ok ? "chain intact" : "CHAIN BROKEN at entry " + a.audit.first_bad), h("div", { class: "muted" }, a.audit.entries, " entries")),
+      h("div", { class: "card" }, h("h3", {}, "Actions in 24 h"), h("div", {}, a.actions_24h))),
+    h("h3", {}, "Waiting for you"), note,
+    a.approvals.length ? h("table", {}, h("tr", {}, ...["Action", "Target", "Why", ""].map((c) => h("th", {}, c))),
+      ...a.approvals.map((p) => h("tr", {}, h("td", {}, p.action), h("td", {}, p.target), h("td", {}, (p.context || {}).reason || "", " ", (p.context || {}).alert || ""), h("td", {}, h("button", { onclick: act(p.id, "confirm") }, "Confirm"), " ", h("button", { class: "secondary", onclick: act(p.id, "discard") }, "Discard"))))) : h("p", { class: "muted" }, "Nothing is waiting."),
+    ...(a.promotion_candidates.length ? [h("h3", {}, "Earned trust"), ...a.promotion_candidates.map((c) => h("p", {}, `${c.action}: ${c.streak} approved successes in a row. Consider level: auto in agents/autonomy.yaml (a reviewed PR).`))] : []),
+    h("h3", {}, "Recent decisions"),
+    h("table", {}, h("tr", {}, ...["When", "Kind", "Actor", "Action", "Target", "Result"].map((c) => h("th", {}, c))),
+      ...a.audit_tail.map((e) => h("tr", {}, h("td", {}, new Date(e.ts * 1000).toLocaleString()), h("td", {}, e.kind), h("td", {}, e.actor), h("td", {}, e.action), h("td", {}, e.target), h("td", {}, e.level || (e.ok === undefined ? e.reason || "" : e.ok ? "ok" : "failed"), e.reason && e.level ? ": " + e.reason : "")))));
 }
 
 /* ---- compute ---- */

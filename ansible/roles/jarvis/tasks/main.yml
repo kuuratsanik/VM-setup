@@ -16,6 +16,15 @@
     group: jarvis
     mode: "0750"
 
+- name: Create the shared autonomy state directory (root operator and jarvis both write; group-writable, setgid)
+  ansible.builtin.file:
+    path: /var/lib/vmsetup/autonomy
+    state: directory
+    owner: root
+    group: jarvis
+    mode: "2770"
+    recurse: true
+
 - name: Read the gateway key from the existing secrets file
   ansible.builtin.slurp:
     src: /etc/vmsetup/secrets.env

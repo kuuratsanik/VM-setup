@@ -7,9 +7,12 @@ import sys
 
 # Changes here need the 'human-approved' label.
 PROTECTED = ("agents/", "jarvis/", "infra-mcp/", "media-mcp/", "training/", "evals/", ".github/", "ansible/roles/ai_stack/", "ansible/roles/jarvis/", "profile.override.yaml")
+# Low-risk files: no human label needed, and agent PRs that touch only these may auto-merge (agents/automerge.py).
+TIER0 = ("agents/runbooks/", "proposals/")
 # Safety-critical files: agent-authored PRs (branch agent/*) may never touch these, label or not.
 IMMUTABLE = (
     "agents/reviewer.py", "agents/evolve.py", "agents/deploy.py", "agents/pr.py", "agents/runtime.py", "agents/redact.py",
+    "agents/policy.py", "agents/approvals.py", "agents/actions.py", "agents/notify.py", "agents/automerge.py", "agents/autonomy.yaml",
     "agents/manifest.yaml", "agents/mcp_servers.yaml", "agents/evalgate.py", "infra-mcp/", "evals/cases.yaml", ".github/", "ansible/", "terraform/",
     "gitops/", "training/", "media-mcp/", "jarvis/", "profile.override.yaml", "tests/test_guardrails.py",
 )
@@ -20,9 +23,13 @@ def git(*args):
     return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout
 
 
+def is_tier0(path):
+    return path.startswith(TIER0) and path.endswith((".yaml", ".md")) and ".." not in path
+
+
 def policy_problems(files, diff, labels=(), head_ref=""):
     problems = []
-    touched = [f for f in files if f.startswith(PROTECTED)]
+    touched = [f for f in files if f.startswith(PROTECTED) and not is_tier0(f)]
     if touched and "human-approved" not in labels:
         problems.append(f"protected paths changed without the 'human-approved' label: {touched}")
     if head_ref.startswith("agent/"):

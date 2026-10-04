@@ -25,7 +25,9 @@ Argo CD pulls `gitops/` from Git, so push this repo to `gitops_repo_url` (public
 | 5. k3s | `ssh ops@10.10.10.10 'sudo k3s kubectl get nodes'` (cloud-init takes a few minutes; `cloud-init status --wait`) | all nodes of the cluster `Ready` |
 | 6. Argo CD | `./scripts/kubeconfig.sh && KUBECONFIG=~/.kube/hub.yaml kubectl -n argocd get applications` | `root` plus apps `Synced`/`Healthy` (CRDs may need a couple of sync retries on first boot) |
 | 7. Monitoring | `ssh -L 9090:127.0.0.1:9090 host`, open `localhost:9090/targets` | node, libvirt, vms, netdata targets `UP` |
-| 8. Operator | `curl -X POST 127.0.0.1:8085 -d '{"alerts":[{"status":"firing","labels":{"alertname":"GuestDown"}}]}'` | a new row in `/var/lib/vmsetup/incidents.jsonl` and, with vector memory on, in the `incidents` table (mutating tools stay dry-run until `VMSETUP_LIVE=1`) |
+| 8. Operator | `curl -X POST 127.0.0.1:8085 -d '{"alerts":[{"status":"firing","labels":{"alertname":"GuestDown"}}]}'` | a new row in `/var/lib/vmsetup/incidents.jsonl` and, with vector memory on, in the `incidents` table (mutating tools never run for real until the autonomy policy allows it: `agents/autonomy.yaml`, default `mode: supervised`, so they are queued for approval in Jarvis) |
+
+Verified without hardware: the Argo CD bootstrap manifests from cloud-init and the `dev` GitOps tree were applied to a real k3s (Docker) and synced to Healthy (Argo CD, root app, cert-manager, sealed-secrets, system-upgrade-controller plans), and the `ai-readonly` token can read pods, nodes, events and Argo CD applications but not secrets, and cannot create or delete anything. The empty `K3S_URL` on first servers is accepted by the k3s installer.
 
 If a node never becomes `Ready`: `sudo journalctl -u k3s -u k3s-agent` on the node, and check that `K3S_URL` points at the cluster's first server (primary servers have none, which is expected).
 
@@ -67,7 +69,7 @@ Runs as the unprivileged `jarvis` user on `127.0.0.1:8088`; reach it with `ssh -
 
 1. Create the owner account (there is no default login): `sudo -u jarvis env JARVIS_STATE_DIR=/var/lib/vmsetup/jarvis PYTHONPATH=/opt/vm-setup /opt/vm-setup/.venv/bin/python -m jarvis.manage set-password`. Optional TOTP: `enroll-totp`, then `confirm-totp CODE`.
 2. Tabs: Overview (services, nodes, spend), Chat (streaming, hybrid local/cloud models, tools, voice, image), Compute (RunPod and Kaggle), Setup (provider onboarding), Incidents.
-3. Chat tools reuse `agents/mcp_servers.yaml`. Anything that changes state (VM start/stop/snapshot, renting a GPU, running a notebook) is only proposed; you press Confirm. Infra actions stay dry-run until `VMSETUP_LIVE=1`.
+3. Chat tools reuse `agents/mcp_servers.yaml`. Anything that changes state (VM start/stop/snapshot, renting a GPU, running a notebook) is only proposed; you press Confirm. Infra actions follow the autonomy policy (below).
 
 Accounts and sign-in: you create the accounts yourself (RunPod, Kaggle, OpenAI, Anthropic, OpenRouter, Hugging Face, GitHub). Jarvis does not automate registration, CAPTCHA, or email/phone verification, which provider terms generally forbid. The Setup tab opens each sign-up and token page, lists the steps, checks the pasted token with a harmless read-only call, and hands it to a root helper (`jarvis/apply_secrets.py`, allowlisted names and strict value patterns only) that writes it to `/etc/vmsetup` and restarts the consumers. Chat refuses messages that look like keys.
 
@@ -75,16 +77,31 @@ Compute: RunPod pods go through a confirmation, an hourly price cap, a maximum l
 
 Dashboard security: Argon2id password, optional TOTP, lockout after 5 failures per address, `SameSite=Strict` HttpOnly session, custom header plus Origin check on every write, strict CSP, no secrets ever returned by the API.
 
+## Autonomy: what runs by itself and what waits for you
+Every state-changing action passes through one policy engine (`agents/policy.py`, configured in `agents/autonomy.yaml`). The mode is one line:
+
+| Mode | Behaviour |
+|---|---|
+| `dry_run` | tools only describe what they would do |
+| `supervised` (shipped default) | every action is queued; you approve it in Jarvis > Autonomy and get a notification |
+| `autonomous` | each action follows its level: `auto` runs inside budgets, `approve` queues, `deny` is refused |
+
+Safety layers that stay on in every mode: kill switch (`/etc/vmsetup/AGENTS_PAUSED`), per-target hourly limits and a daily action budget, a circuit breaker (repeated failures degrade everything to approval until you reset it), snapshot-before-stop, and a hash-chained audit log (`python agents/policy.py verify-audit`). Human-approved successes build a trust ledger; a long clean streak is suggested in the daily digest and Jarvis as evidence for promoting an action to `auto`, which is itself a reviewed PR.
+
+To move toward autonomy: run in `supervised` for a while, then change `mode: autonomous` in a reviewed PR once the ledger and audit log look right. In `autonomous` as shipped, snapshot and start run by themselves; stop needs approval.
+
+Humans stay in the loop for: changing the autonomy policy, guardrail files, infrastructure applies (Terraform/Ansible), spending money (RunPod confirmations), deleting things, account registration, and any code, prompt, or workflow change outside the low-risk tier. Low-risk agent PRs (runbooks under `agents/runbooks/`, text under `proposals/`) auto-merge after `ci` and `agent-review` pass (`agents/automerge.py`, `.github/workflows/auto-merge.yml`; hold one back with a `hold` label). A daily digest (`agents/digest.py`) sends one message to `AUTONOMY_NOTIFY_URL` when something needs you.
+
 ## Self-improvement and its limits
 Self-healing (Operator, Argo CD `selfHeal`, systemd restarts), self-upgrading (`deploy.py` rolls out approved `main` commits with automatic rollback; Renovate; k3s system-upgrade-controller; unattended-upgrades) and self-coding (`evolve.py`, `agent-fix`) exist, but none of it is autonomous in the sense of unchecked:
-- Agents change themselves only through pull requests. Nothing merges itself, and Terraform/Ansible are never applied by an agent.
+- Agents change themselves only through pull requests. Only the low-risk tier (runbooks, proposals) merges itself after the checks pass; everything else needs you, and Terraform/Ansible are never applied by an agent.
 - Agent-authored PRs (branch `agent/*`) cannot touch the files in `IMMUTABLE` in `agents/reviewer.py` (reviewer, evolve, deploy, runtime, MCP allowlist, eval cases, manifest, workflows, infrastructure code), even with the label. Other protected paths need `human-approved`.
 - `evolve.py` must pass the tests and, for prompt changes, the eval gate (including every prompt-injection case), is limited to 3 files and 200 changed lines, and runs at most once a day.
 - `deploy.py` deploys only commits from merged PRs (protected paths need the label), runs the tests first, and rolls back if the new version is unhealthy.
 - The kill switch `/etc/vmsetup/AGENTS_PAUSED` stops the Operator and Evolve. Add `agents/` to branch protection with required code-owner review (`.github/CODEOWNERS`).
-This is a bounded automation loop with human approval, not AGI.
+This is a bounded automation loop with human approval where it matters, not AGI.
 - `ansible/`: host hardening, AI gateway, monitoring, operator agent service.
 - `agents/manifest.yaml`: agent team, autonomy levels, guardrails.
-- `infra-mcp/`: allowlisted MCP server for the node VMs (dry-run by default, kill switch at `/etc/vmsetup/AGENTS_PAUSED`).
+- `infra-mcp/`: allowlisted MCP server for the node VMs (dry-run by default, gated by the autonomy policy, kill switch at `/etc/vmsetup/AGENTS_PAUSED`).
 
 Put API keys in `/etc/vmsetup/secrets.env` (root-only, never committed). The image URL defaults to the Ubuntu 26.04 LTS minimal cloud image; the Upgrade agent opens a PR when a newer LTS appears.

@@ -12,9 +12,11 @@ from pathlib import Path
 import config  # noqa: F401  (loads /etc/vmsetup/secrets.env)
 import memory
 import yaml
+from actions import gate
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from openai import OpenAI
+from policy import Policy
 from redact import redact
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -22,8 +24,7 @@ MANIFEST = yaml.safe_load((ROOT / "agents/manifest.yaml").read_text())
 KILL_SWITCH = Path(MANIFEST["guardrails"]["kill_switch_file"])
 MAX_STEPS = MANIFEST["guardrails"]["max_steps_per_task"]
 INCIDENTS = Path(os.environ.get("VMSETUP_INCIDENTS", "/var/lib/vmsetup/incidents.jsonl"))
-LIVE = os.environ.get("VMSETUP_LIVE") == "1"  # otherwise mutating tools stay dry-run
-MUTATING = {"vm_snapshot", "vm_start", "vm_stop"}  # served by the infra MCP server only
+MUTATING = {"vm_snapshot", "vm_start", "vm_stop"}  # served by the infra MCP server; always go through the autonomy policy
 MODEL = os.environ.get("VMSETUP_MODEL", "default")
 
 llm = OpenAI(base_url=os.environ.get("LITELLM_URL", "http://127.0.0.1:4000"), api_key=os.environ.get("LITELLM_KEY", "none"))
@@ -99,6 +100,7 @@ async def handle_alert(alert):
     name = alert["labels"].get("alertname", "unknown")
     if KILL_SWITCH.exists():
         return record(name, "skipped", "kill switch active")
+    policy = Policy()  # re-read per alert so a deployed policy change applies immediately
 
     async with AsyncExitStack() as stack:
         routes, specs = await connect_servers(stack)
@@ -125,12 +127,19 @@ async def handle_alert(alert):
                 if call.function.name in routes:
                     server, session, tool_name = routes[call.function.name]
                     args = json.loads(call.function.arguments or "{}")
+
+                    async def run(tool, a, session=session):
+                        try:
+                            res = await session.call_tool(tool, a)
+                            return not res.isError, str(res.content)[:4000]
+                        except Exception as exc:
+                            return False, f"error: {exc}"
+
                     if server == "infra" and tool_name in MUTATING:
-                        args["dry_run"] = not LIVE
-                    try:
-                        result_text = str((await session.call_tool(tool_name, args)).content)[:4000]
-                    except Exception as exc:
-                        result_text = f"error: {exc}"
+                        outcome = await gate(policy, run, tool_name, str(args.get("domain", "")), {k: v for k, v in args.items() if k != "dry_run"}, actor="operator", context={"alert": name})
+                        result_text = outcome.text
+                    else:
+                        result_text = (await run(tool_name, args))[1]
                 transcript.append({"role": "tool", "name": call.function.name, "content": redact(result_text)})
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": result_text})
         record(name, "step_limit", "escalate to human", usage, MODEL, transcript)
