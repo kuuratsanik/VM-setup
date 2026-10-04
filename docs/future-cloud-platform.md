@@ -17,9 +17,7 @@ It covers letting vm-setup create k3s clusters on a cloud provider (Hetzner Clou
 | Compute | Jarvis rents GPU pods and runs hosted notebooks (`jarvis/compute/`), with price caps, a lifetime limit and a reaper | This is the pattern to copy for cloud VMs |
 | Guardrails | `agents/reviewer.py`: agent PRs may never touch `terraform/`, `ansible/` or `gitops/` (IMMUTABLE). Human PRs under `jarvis/`, `agents/` and others need the `human-approved` label | `PROTECTED` leaves most infra paths open for human PRs: `terraform/`, `gitops/`, `profiles/`, `detect.py`, `bootstrap.sh`, `scripts/`, and every Ansible role except `ai_stack` and `jarvis`. `.github/CODEOWNERS` lists neither `terraform/` nor `gitops/` |
 | CI | `ci.yml`: `terraform validate`, ansible-lint, yamllint, py_compile, `node --check`, pytest, and `kubectl kustomize` for each cluster | There is no browser test of Jarvis and no live sync test of GitOps |
-| Cloud dev session | 4 vCPU, 15 GB RAM, **no `/dev/kvm`**. The Docker CLI is installed but **no daemon runs** at session start, and there is no systemd. Playwright's Chromium is preinstalled under `/opt/pw-browsers`, but the Python `playwright` package is not. terraform, kubectl, helm, ansible-lint, yamllint, k3d and kind are not installed | Libvirt VMs can never run in a cloud session. Containers can, but only if the setup script starts `dockerd` and the environment permits it. Verify that once before relying on it |
-
----
+| Cloud dev session | See [`cloud-dev-plan.md` §1](cloud-dev-plan.md#1-what-a-cloud-session-is) | Libvirt VMs can never run in a cloud session, so applies stay on the owner's host |
 
 ---
 
