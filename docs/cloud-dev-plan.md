@@ -40,7 +40,7 @@ Reference docs: [cloud environments](https://code.claude.com/docs/en/cloud-envir
 set -euo pipefail
 # Pins: bump here only.
 TF=1.10.5; KUBECTL=v1.31.4; HELM=v3.16.3; K3D=v5.7.4
-PLAYWRIGHT=""      # SET ME: the release whose browsers.json lists Chromium revision 1194 (matches /opt/pw-browsers/chromium-1194)
+PLAYWRIGHT=1.56.0  # ships Chromium revision 1194, matching /opt/pw-browsers/chromium-1194 (verified)
 
 pip install -q -r agents/requirements.txt -r jarvis/requirements.txt pytest pytest-asyncio ansible-lint yamllint
 ansible-galaxy collection install -r ansible/requirements.yml || echo "WARN: ansible-galaxy failed (check network allowlist)"
