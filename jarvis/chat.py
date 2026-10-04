@@ -1,6 +1,7 @@
 """Jarvis chat: streams a model reply, runs read-only tools, and turns every state-changing call into a pending action
 that only the logged-in owner can confirm in the UI."""
 import json
+import logging
 import os
 import re
 import secrets
@@ -24,6 +25,8 @@ PROMPT = (ROOT / "jarvis/prompts/jarvis.txt").read_text().strip()
 SECRET_RE = re.compile(
     r"(sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}|github_pat_\w{20,}|hf_[A-Za-z0-9]{20,}|xox[bap]-\S+|rpa_[A-Za-z0-9]{16,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
 )
+log = logging.getLogger(__name__)
+CLAIM_STALE_S = 300
 PENDING_TTL_S = 600
 MAX_STEPS = 8
 
@@ -42,7 +45,8 @@ def contains_secret(text):
 
 
 def history_has_secret(messages):
-    """Only the owner's own turns are screened; an assistant answer may legitimately quote e.g. a PEM header."""
+    """Guard against the owner pasting a secret by accident; NOT a security boundary (it checks only user turns, and a client can send any history).
+    Only the owner's own turns are screened; an assistant answer may legitimately quote e.g. a PEM header."""
     return any(m.get("role") == "user" and contains_secret(str(m.get("content", ""))) for m in messages)
 
 
@@ -58,6 +62,7 @@ class Hub:
         self.pending = {}
 
     async def start(self):
+        self.sweep_claimed()
         self.stack = AsyncExitStack()
         self.routes, self.specs = await runtime.connect_servers(self.stack)
         for name, (desc, props, _) in LOCAL_TOOLS.items():
@@ -101,7 +106,11 @@ class Hub:
         self._expire()
         item = self.pending.pop(pid, None)
         if item is not None:
-            return await self.execute(item["name"], item["args"])
+            try:
+                return await self.execute(item["name"], item["args"])
+            except Exception:  # the pop above is synchronous (double-click safe); a failed run must stay retryable
+                self.pending[pid] = item
+                raise
         doc = approvals.get(pid)
         if doc is None:
             raise KeyError("unknown or expired action")
@@ -120,8 +129,11 @@ class Hub:
 
         try:
             outcome = await gate(Policy(), call, doc["action"], doc["target"], doc["args"], actor="owner", context={"source": "approval"}, confirmed=True)
-        except BaseException as exc:
+        except Exception as exc:
             self._finish_claimed(pid, claimed, "error", f"error: {exc}")
+            raise
+        except BaseException as exc:  # e.g. CancelledError: the tool may or may not have run
+            self._finish_claimed(pid, claimed, "unknown", f"interrupted ({type(exc).__name__}); the tool may still have run, check before retrying")
             raise
         self._finish_claimed(pid, claimed, outcome.status, outcome.text)
         return outcome.text
@@ -151,9 +163,29 @@ class Hub:
         old = os.umask(0o007)
         try:
             (approvals._dir("approvals-done") / f"{pid}.json").write_text(json.dumps(doc))
+        except OSError as exc:
+            log.error("jarvis: could not record outcome of approval %s (%s): %s", pid, status, exc)
         finally:
             os.umask(old)
-        claimed.unlink(missing_ok=True)
+            claimed.unlink(missing_ok=True)
+
+    @staticmethod
+    def sweep_claimed(max_age=CLAIM_STALE_S):
+        """Record claims orphaned by a crash as 'interrupted' (never re-run: the tool may have executed)."""
+        try:
+            files = list(approvals._dir("approvals").glob("*.claimed"))
+        except OSError:
+            return 0
+        n = 0
+        for path in files:
+            try:
+                if time.time() - path.stat().st_mtime < max_age:
+                    continue
+            except OSError:
+                continue
+            Hub._finish_claimed(path.stem, path, "interrupted", "Jarvis stopped while this was running; it may or may not have executed")
+            n += 1
+        return n
 
     def discard(self, pid):
         if self.pending.pop(pid, None) is not None:
@@ -205,5 +237,5 @@ class Chat:
                 except Exception as exc:
                     result = f"error: {exc}"
                     yield {"type": "tool", "name": call["name"], "result": result}
-                messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
+                messages.append({"role": "tool", "tool_call_id": call["id"], "content": redact(result)})  # the model may be cloud-hosted
         yield {"type": "done"}

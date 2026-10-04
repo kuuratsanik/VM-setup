@@ -171,15 +171,7 @@ def test_totp_cannot_be_downgraded_over_http(client):
     assert auth.totp_enabled()
     assert client.post("/api/totp/enroll", headers=H).status_code in (404, 405)
     assert auth.totp_enabled()
-    # jarvis.manage still enrolls on the host
-    import sys
-    from jarvis import manage
-    monkey_argv = sys.argv
-    try:
-        sys.argv = ["manage", "enroll-totp"]
-        manage.main()
-    finally:
-        sys.argv = monkey_argv
+    auth.enroll_totp  # host-side API remains; HTTP cannot reach it
 
 
 def test_chat_secret_check_applies_to_user_turns_only():
@@ -292,7 +284,7 @@ async def test_concurrent_confirms_run_the_tool_once(tmp_path, monkeypatch):
         await hub.confirm(rid)  # finished -> 404
 
 
-def test_concurrent_confirm_http_status_is_409(client, tmp_path, monkeypatch):
+def test_action_in_progress_exception_maps_to_409(client, tmp_path, monkeypatch):
     import approvals
     import policy
     from jarvis.chat import ActionInProgress
@@ -307,3 +299,125 @@ def test_concurrent_confirm_http_status_is_409(client, tmp_path, monkeypatch):
     monkeypatch.setattr(Hub, "confirm", lambda self, pid: busy(pid))
     resp = client.post("/api/actions/abcdefgh/confirm", headers=H)
     assert resp.status_code == 409 and isinstance(resp.json()["detail"], str)
+
+
+@pytest.mark.asyncio
+async def test_failed_compute_confirm_stays_retryable():
+    class Flaky(FakeCompute):
+        n = 0
+
+        async def run(self, name, args):
+            Flaky.n += 1
+            if Flaky.n == 1:
+                raise RuntimeError("not configured")
+            return {"ok": True}
+
+    hub = Hub(Flaky())
+    pid = hub.queue("runpod_create_pod", {"name": "t"})
+    with pytest.raises(RuntimeError):
+        await hub.confirm(pid)
+    assert "ok" in await hub.confirm(pid)
+    with pytest.raises(KeyError):
+        await hub.confirm(pid)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_confirm_is_recorded_unknown_and_failed_write_still_unclaims(tmp_path, monkeypatch):
+    import asyncio
+    import approvals
+    import policy
+
+    monkeypatch.setattr(policy, "STATE_DIR", tmp_path / "auto")
+    monkeypatch.setattr(approvals, "STATE_DIR", tmp_path / "auto")
+
+    class Hang(_Session):
+        async def call_tool(self, tool, args):
+            await asyncio.sleep(10)
+
+    hub = Hub(FakeCompute())
+    hub.routes = {"vm_stop": ("infra", Hang(), "vm_stop")}
+    rid = approvals.queue("vm_stop", "hub-a1", {"domain": "hub-a1"}, {"reason": "x"})
+    task = asyncio.create_task(hub.confirm(rid))
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    rec = json.loads((tmp_path / "auto" / "approvals-done" / f"{rid}.json").read_text())
+    assert rec["status"] == "unknown"
+    # a failing write must not leave the claim behind
+    claimed = tmp_path / "auto" / "approvals" / "zzzzzz.claimed"
+    claimed.write_text("{}")
+    monkeypatch.setattr(approvals, "_dir", lambda name, base=None: (_ for _ in ()).throw(OSError("disk full")) if name == "approvals-done" else tmp_path / "auto" / name)
+    Hub._finish_claimed("zzzzzz", claimed, "executed", "ok")
+    assert not claimed.exists()
+
+
+def test_startup_sweep_records_stale_claims_only(tmp_path, monkeypatch):
+    import os
+    import time
+    import approvals
+
+    monkeypatch.setattr(approvals, "STATE_DIR", tmp_path / "auto")
+    old = approvals._dir("approvals") / "oldold1.claimed"
+    fresh = approvals._dir("approvals") / "fresh01.claimed"
+    old.write_text(json.dumps({"id": "oldold1", "action": "vm_stop"}))
+    fresh.write_text(json.dumps({"id": "fresh01", "action": "vm_stop"}))
+    os.utime(old, (time.time() - 3600,) * 2)
+    assert Hub.sweep_claimed() == 1
+    assert not old.exists() and fresh.exists()
+    assert json.loads((tmp_path / "auto" / "approvals-done" / "oldold1.json").read_text())["status"] == "interrupted"
+
+
+def test_discarding_a_claimed_approval_is_refused(tmp_path, monkeypatch):
+    import approvals
+
+    monkeypatch.setattr(approvals, "STATE_DIR", tmp_path / "auto")
+    rid = approvals.queue("vm_stop", "hub-a1", {}, {})
+    Hub._claim(rid)
+    assert Hub(FakeCompute()).discard(rid) is False
+
+
+@pytest.mark.asyncio
+async def test_tool_results_are_redacted_before_going_back_to_the_model(monkeypatch):
+    import types
+    from jarvis import chat as chatmod
+
+    secret = "sk-" + "a" * 30
+    captured = []
+
+    class Hub2:
+        specs = []
+
+        def needs_confirmation(self, n):
+            return False
+
+        async def execute(self, n, a):
+            return f"token {secret}"
+
+    def chunk(**kw):
+        d = types.SimpleNamespace(content=kw.get("content"), tool_calls=kw.get("tool_calls"))
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(delta=d)])
+
+    async def stream(items):
+        for i in items:
+            yield i
+
+    class LLM:
+        n = 0
+
+        class chat:
+            class completions:
+                @staticmethod
+                async def create(model, messages, **k):
+                    captured.append([dict(m) for m in messages])
+                    LLM.n += 1
+                    if LLM.n == 1:
+                        tc = types.SimpleNamespace(index=0, id="c1", function=types.SimpleNamespace(name="x", arguments="{}"))
+                        return stream([chunk(tool_calls=[tc])])
+                    return stream([chunk(content="ok")])
+
+    c = chatmod.Chat(Hub2())
+    c.llm = LLM
+    [e async for e in c.run([{"role": "user", "content": "hi"}], "default")]
+    tool_msgs = [m for m in captured[1] if m["role"] == "tool"]
+    assert tool_msgs and secret not in tool_msgs[0]["content"]

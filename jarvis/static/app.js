@@ -24,7 +24,7 @@ const getJSON = async (p) => (await api(p)).json();
 const post = async (p, json) => (await api(p, { method: "POST", json: json ?? {} })).json();
 // A confirm/discard that finds the action claimed or gone (409/404) was handled by an earlier request.
 const settled = (e) => e.status === 409 || e.status === 404;
-const failText = (e) => (settled(e) ? "already handled" : e.message);
+const failText = (e) => (e.status === 409 ? "already being confirmed by another request" : e.status === 404 ? "not run: " + e.message : e.message);
 
 const TABS = ["Overview", "Chat", "Autonomy", "Compute", "Setup", "Incidents"];
 let current = "Overview";
@@ -45,7 +45,14 @@ const RENDERERS = { Overview: renderOverview, Autonomy: renderAutonomy, Compute:
 async function runTab(t, ...args) {
   const fn = RENDERERS[t]; if (!fn) return;
   try { await fn(...args); }
-  catch (e) { if (e.message !== "login required") $("tab-" + t.toLowerCase()).replaceChildren(h("p", { class: "err" }, "Error: " + e.message)); }
+  catch (e) { if (e.message !== "login required") $("tab-" + t.toLowerCase()).replaceChildren(h("p", { class: "err" }, "Error: " + e.message + (typeof args[0] === "string" && args[0] ? " (earlier result: " + args[0] + ")" : ""))); }
+}
+// Timer refresh: keep the existing content, report a failed poll in a small status line.
+const pollErr = h("p", { class: "err" });
+async function pollOverview() {
+  if (!pollErr.isConnected) $("tab-overview").before(pollErr);
+  try { await renderOverview(); pollErr.textContent = ""; }
+  catch (e) { if (e.message !== "login required") pollErr.textContent = "Refresh failed: " + e.message; }
 }
 
 async function renderOverview() {
@@ -94,14 +101,14 @@ function pendingCard(ev) {
 }
 
 async function send(text) {
-  line("user", text); history.push({ role: "user", content: text });
+  const userEl = line("user", text); history.push({ role: "user", content: text });
   const reply = line("assistant", ""); let full = "";
   const mine = history[history.length - 1];
   try {
     let msgs = history.slice(-30); while (msgs.length && msgs[0].role !== "user") msgs.shift();
     let res;
     try { res = await api("/api/chat", { method: "POST", json: { messages: msgs, model: $("model").value, tools: $("use-tools").checked } }); }
-    catch (e) { const i = history.indexOf(mine); if (i >= 0) history.splice(i, 1); throw e; } // rejected message must not poison later sends
+    catch (e) { const i = history.indexOf(mine); if (i >= 0) history.splice(i, 1); if (e.message === "login required") { userEl.remove(); reply.remove(); return; } throw e; } // rejected message must not poison later sends
     const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
     for (;;) {
       const { done, value } = await reader.read(); if (done) break;
@@ -231,5 +238,5 @@ $("logout").addEventListener("click", async () => { await post("/api/logout"); l
   const s = await (await fetch("/api/auth/state")).json();
   if (!s.configured) $("login-note").textContent = "No account yet. On the host run: python -m jarvis.manage set-password";
   if (s.logged_in) { await initChat(); showApp(); } else showLogin();
-  setInterval(() => current === "Overview" && !$("app").classList.contains("hidden") && runTab("Overview"), 15000);
+  setInterval(() => current === "Overview" && !$("app").classList.contains("hidden") && pollOverview(), 15000);
 })();
