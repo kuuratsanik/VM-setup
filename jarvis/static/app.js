@@ -39,13 +39,14 @@ function buildTabs() {
 function open(t) {
   current = t; buildTabs();
   for (const name of TABS) $("tab-" + name.toLowerCase()).classList.toggle("hidden", name !== t);
+  pollErr.classList.toggle("hidden", t !== "Overview");
   runTab(t);
 }
 const RENDERERS = { Overview: renderOverview, Autonomy: renderAutonomy, Compute: renderCompute, Setup: renderSetup, Incidents: renderIncidents };
 async function runTab(t, ...args) {
   const fn = RENDERERS[t]; if (!fn) return;
   try { await fn(...args); }
-  catch (e) { if (e.message !== "login required") $("tab-" + t.toLowerCase()).replaceChildren(h("p", { class: "err" }, "Error: " + e.message + (typeof args[0] === "string" && args[0] ? " (earlier result: " + args[0] + ")" : ""))); }
+  catch (e) { if (e.message !== "login required") $("tab-" + t.toLowerCase()).replaceChildren(h("p", { class: "err" }, "Error: " + e.message), ...(typeof args[0] === "string" && args[0] ? [h("p", { class: "muted" }, "Earlier result: " + args[0])] : [])); }
 }
 // Timer refresh: keep the existing content, report a failed poll in a small status line.
 const pollErr = h("p", { class: "err" });
