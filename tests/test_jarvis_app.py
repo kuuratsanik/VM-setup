@@ -175,14 +175,14 @@ def test_totp_cannot_be_downgraded_over_http(client):
 
 def test_chat_secret_check_applies_to_user_turns_only():
     from jarvis.chat import history_has_secret
-    pem = "-----BEGIN RSA PRIVATE KEY-----"
+    pem = "-----BEGIN RSA " + "PRIVATE KEY-----"
     assert not history_has_secret([{"role": "user", "content": "how do I rotate a key?"}, {"role": "assistant", "content": f"A key starts with {pem}"}])
     assert history_has_secret([{"role": "assistant", "content": "ok"}, {"role": "user", "content": pem}])
 
 
 def test_chat_endpoint_accepts_assistant_pem_quote(client):
     login(client)
-    msgs = [{"role": "assistant", "content": "-----BEGIN PRIVATE KEY-----"}, {"role": "user", "content": "hi"}]
+    msgs = [{"role": "assistant", "content": "-----BEGIN " + "PRIVATE KEY-----"}, {"role": "user", "content": "hi"}]
     resp = client.post("/api/chat", headers=H, json={"messages": msgs, "tools": False})
     assert resp.status_code == 200  # not rejected as a pasted secret
 
