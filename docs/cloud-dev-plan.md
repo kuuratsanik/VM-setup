@@ -139,7 +139,7 @@ Loop (as used for the Jarvis audit fixes):
 |---|---|
 | Jarvis UI | `node --check jarvis/static/app.js`, Jarvis tests, `jarvis-demo` screenshots with no console errors |
 | Jarvis server | `python -m py_compile jarvis/*.py jarvis/compute/*.py`, `python -m pytest -q tests` |
-| Agents / MCP | py_compile, pytest (including `tests/test_guardrails.py`), the eval gate when a model key is available |
+| Agents / MCP | py_compile, pytest (including `tests/test_guardrails.py`), the eval gate when a gateway endpoint is configured (§3.3) |
 | Terraform | `terraform -chdir=terraform init -backend=false && terraform -chdir=terraform validate && terraform -chdir=terraform fmt -check`. Every command needs `-chdir`; without it, `validate` runs in the repo root and passes with no `.tf` files |
 | Ansible | `ansible-lint ansible/` |
 | GitOps | `kubectl kustomize gitops/clusters/<c>` for each cluster, then `gitops-smoke` for app changes |
