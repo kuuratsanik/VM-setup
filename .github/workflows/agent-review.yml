@@ -1,0 +1,17 @@
+name: agent-review
+on:
+  pull_request:
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - run: pip install openai
+      - run: python agents/reviewer.py
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          REVIEWER_API_KEY: ${{ secrets.REVIEWER_API_KEY }}
+          REVIEWER_MODEL: ${{ vars.REVIEWER_MODEL }}

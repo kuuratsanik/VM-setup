@@ -1,0 +1,48 @@
+- name: Install virtualization packages
+  ansible.builtin.apt:
+    name: [qemu-kvm, libvirt-daemon-system, libvirt-clients, virtinst, bridge-utils, ovmf, cpu-checker, zram-tools, unattended-upgrades, ufw]
+    state: present
+    update_cache: true
+
+- name: Enable libvirt
+  ansible.builtin.systemd:
+    name: libvirtd
+    enabled: true
+    state: started
+
+- name: Allow guest DNS and metadata traffic into the host from the k8s bridge
+  community.general.ufw:
+    rule: allow
+    direction: in
+    interface: virbr-k8s
+
+- name: Allow routed guest traffic out via the host
+  community.general.ufw:
+    rule: allow
+    route: true
+    interface_in: virbr-k8s
+
+- name: Allow SSH only
+  community.general.ufw:
+    rule: allow
+    port: "22"
+    proto: tcp
+
+- name: Enable firewall
+  community.general.ufw:
+    state: enabled
+    policy: deny
+
+- name: Install weekly profile re-evaluation timer
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop: [vmsetup-detect.service, vmsetup-detect.timer]
+
+- name: Enable re-evaluation timer
+  ansible.builtin.systemd:
+    name: vmsetup-detect.timer
+    enabled: true
+    state: started
+    daemon_reload: true

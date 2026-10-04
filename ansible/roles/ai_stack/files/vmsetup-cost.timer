@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily Cost agent
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target

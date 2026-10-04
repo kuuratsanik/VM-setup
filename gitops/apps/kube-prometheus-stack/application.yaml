@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kube-prometheus-stack
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-prometheus-stack
+    targetRevision: "91.9.0"
+    helm:
+      valuesObject:
+        alertmanager: { enabled: false }
+        grafana:
+          additionalDataSources:
+            - { name: Loki, type: loki, access: proxy, url: "http://loki.logging.svc:3100" }
+        prometheus:
+          prometheusSpec: { retention: 7d }
+        # k3s runs these inside one process and does not expose them for scraping
+        kubeControllerManager: { enabled: false }
+        kubeScheduler: { enabled: false }
+        kubeProxy: { enabled: false }
+        kubeEtcd: { enabled: false }
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]

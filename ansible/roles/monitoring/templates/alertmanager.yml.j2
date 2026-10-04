@@ -1,0 +1,8 @@
+route:
+  receiver: operator
+  group_by: [alertname]
+  repeat_interval: 4h
+receivers:
+  - name: operator
+    webhook_configs:
+      - url: http://127.0.0.1:8085/

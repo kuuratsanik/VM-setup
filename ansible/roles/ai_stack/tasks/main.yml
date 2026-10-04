@@ -1,0 +1,98 @@
+- name: Install container runtime and Python tooling
+  ansible.builtin.apt:
+    name: [podman, python3-venv, python3-pip]
+    state: present
+
+- name: Create config directory
+  ansible.builtin.file:
+    path: /etc/vmsetup
+    state: directory
+    mode: "0750"
+
+- name: Generate gateway key
+  ansible.builtin.set_fact:
+    ai_stack_master_key: "sk-{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits length=40') }}"
+  no_log: true
+
+- name: Create secrets file (never overwritten)
+  ansible.builtin.template:
+    src: secrets.env.j2
+    dest: /etc/vmsetup/secrets.env
+    mode: "0600"
+    force: false
+  no_log: true
+
+- name: Render LiteLLM config
+  ansible.builtin.template:
+    src: litellm.yaml.j2
+    dest: /etc/vmsetup/litellm.yaml
+    mode: "0640"
+
+- name: Download Ollama installer
+  ansible.builtin.get_url:
+    url: https://ollama.com/install.sh
+    dest: /usr/local/src/ollama-install.sh
+    mode: "0755"
+  when: local_llm.enabled and (local_llm.engine | default('ollama')) == 'ollama'
+
+- name: Install Ollama when local LLM is enabled
+  ansible.builtin.command: /usr/local/src/ollama-install.sh
+  args:
+    creates: /usr/local/bin/ollama
+  when: local_llm.enabled and (local_llm.engine | default('ollama')) == 'ollama'
+
+- name: Pull local model
+  ansible.builtin.command: "ollama pull {{ local_llm.model }}"
+  when: local_llm.enabled and (local_llm.engine | default('ollama')) == 'ollama'
+  changed_when: true
+
+- name: Copy repo to /opt/vm-setup
+  ansible.posix.synchronize:
+    src: "{{ playbook_dir }}/../"
+    dest: /opt/vm-setup/
+    rsync_opts: ["--exclude=.git", "--exclude=.venv"]
+
+- name: Create agent virtualenv
+  ansible.builtin.pip:
+    requirements: /opt/vm-setup/agents/requirements.txt
+    virtualenv: /opt/vm-setup/.venv
+    virtualenv_command: python3 -m venv
+
+- name: Install operator agent service
+  ansible.builtin.copy:
+    src: vmsetup-agent.service
+    dest: /etc/systemd/system/vmsetup-agent.service
+    mode: "0644"
+
+- name: Enable operator agent
+  ansible.builtin.systemd:
+    name: vmsetup-agent
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Install agent timers
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop: [vmsetup-upgrade.service, vmsetup-upgrade.timer, vmsetup-cost.service, vmsetup-cost.timer]
+
+- name: Enable agent timers
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop: [vmsetup-upgrade.timer, vmsetup-cost.timer]
+
+- name: Run LiteLLM gateway
+  containers.podman.podman_container:
+    name: litellm
+    image: ghcr.io/berriai/litellm:main-stable
+    state: started
+    restart_policy: always
+    network: host
+    volumes: ["/etc/vmsetup/litellm.yaml:/app/config.yaml:ro"]
+    command: ["--config", "/app/config.yaml", "--host", "127.0.0.1"]
+    env_file: /etc/vmsetup/secrets.env

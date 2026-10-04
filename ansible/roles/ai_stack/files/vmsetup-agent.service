@@ -1,0 +1,15 @@
+[Unit]
+Description=VM-setup operator agent
+After=network-online.target
+
+[Service]
+ExecStart=/opt/vm-setup/.venv/bin/python /opt/vm-setup/agents/runtime.py
+EnvironmentFile=-/etc/vmsetup/secrets.env
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectHome=true
+StateDirectory=vmsetup
+
+[Install]
+WantedBy=multi-user.target

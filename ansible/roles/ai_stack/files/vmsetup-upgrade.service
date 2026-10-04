@@ -1,0 +1,7 @@
+[Unit]
+Description=Upgrade agent: check for a newer Ubuntu LTS node image
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vm-setup
+ExecStart=/opt/vm-setup/.venv/bin/python /opt/vm-setup/agents/upgrade.py

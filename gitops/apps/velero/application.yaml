@@ -1,0 +1,35 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: velero
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://vmware-tanzu.github.io/helm-charts
+    chart: velero
+    targetRevision: "12.2.0"
+    helm:
+      valuesObject:
+        initContainers:
+          - name: velero-plugin-for-aws
+            image: velero/velero-plugin-for-aws:v1.10.0
+            volumeMounts: [{ mountPath: /target, name: plugins }]
+        configuration:
+          backupStorageLocation:
+            - name: default
+              provider: aws
+              bucket: CHANGE_ME
+              config: { region: us-east-1, s3ForcePathStyle: "true", s3Url: "https://CHANGE_ME" }
+        credentials:
+          existingSecret: velero-credentials # create as a SealedSecret
+        schedules:
+          daily:
+            schedule: "0 3 * * *"
+            template: { ttl: 168h }
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: velero
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]

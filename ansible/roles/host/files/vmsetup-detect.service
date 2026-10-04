@@ -1,0 +1,8 @@
+[Unit]
+Description=Capacity agent: re-evaluate resource profile and propose changes
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vm-setup
+EnvironmentFile=-/etc/vmsetup/secrets.env
+ExecStart=/opt/vm-setup/.venv/bin/python /opt/vm-setup/agents/capacity.py

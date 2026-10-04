@@ -1,0 +1,30 @@
+- name: Download helm installer
+  ansible.builtin.get_url:
+    url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+    dest: /usr/local/src/get-helm-3.sh
+    mode: "0755"
+
+- name: Install helm
+  ansible.builtin.command: /usr/local/src/get-helm-3.sh
+  args:
+    creates: /usr/local/bin/helm
+
+- name: Install kubectl
+  ansible.builtin.get_url:
+    url: "https://dl.k8s.io/release/{{ lookup('ansible.builtin.url', 'https://dl.k8s.io/release/stable.txt') }}/bin/linux/amd64/kubectl"
+    dest: /usr/local/bin/kubectl
+    mode: "0755"
+
+- name: Install argocd CLI
+  ansible.builtin.get_url:
+    url: https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+    dest: /usr/local/bin/argocd
+    mode: "0755"
+
+- name: Install k9s
+  ansible.builtin.unarchive:
+    src: https://github.com/derailed/k9s/releases/latest/download/k9s_Linux_amd64.tar.gz
+    dest: /usr/local/bin
+    include: [k9s]
+    remote_src: true
+    mode: "0755"

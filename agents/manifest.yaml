@@ -1,0 +1,27 @@
+# Agent team per profile. Agents never approve their own changes; permission changes are L3.
+agents:
+  orchestrator: { autonomy: L0, tier: cloud-frontier }
+  operator:     { autonomy: L1, tier: local-small, escalate_to: cloud-mid, module: agents/runtime.py }
+  infra:        { autonomy: L2, tier: cloud-frontier, output: pull_request }
+  upgrade:      { autonomy: L2, tier: cloud-mid, output: pull_request, module: agents/upgrade.py }
+  capacity:     { autonomy: L2, tier: local-small, output: pull_request, module: agents/capacity.py }
+  security:     { autonomy: L0, tier: cloud-mid }
+  reviewer:     { autonomy: gate, tier: cloud-frontier, must_differ_from_author_model: true, module: agents/reviewer.py }
+  librarian:    { autonomy: L1, tier: local-small }
+  cost:         { autonomy: L1, tier: local-small, module: agents/cost.py }
+
+profiles:
+  min: { enabled: [orchestrator, operator, infra, reviewer], models: cloud-only }
+  std: { enabled: [orchestrator, operator, infra, upgrade, capacity, reviewer, librarian, cost], models: local+cloud }
+  max: { enabled: all, models: local-large+cloud }
+
+autonomy_levels:
+  L0: read-only
+  L1: snapshot, start/stop, restart, cache cleanup
+  L2: resize/config change with checks and rollback timer
+  L3: upgrades, network, storage, delete, permission changes (human approval)
+
+guardrails:
+  kill_switch_file: /etc/vmsetup/AGENTS_PAUSED
+  max_steps_per_task: 30
+  redact_before_cloud: [secrets, ip_addresses]

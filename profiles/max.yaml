@@ -1,0 +1,11 @@
+mgmt_vm: { vcpu: 8, ram_gb: 32, disk_gb: 200 }
+clusters: 2
+servers_per_cluster: 3
+workers_per_cluster: 3
+server_vcpu: 2
+server_ram_gb: 4
+local_llm: { enabled: true, model: "qwen2.5-coder:32b", engine: vllm }
+llm_routing: { cloud_budget_usd_month: 100, default_tier: local-large }
+monitoring: { scrape_interval: 15s, retention_days: 30, loki: true }
+sandbox: incus
+parallel_agents: 4

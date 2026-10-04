@@ -1,0 +1,17 @@
+name: ci
+on:
+  pull_request:
+concurrency: ci-${{ github.ref }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform -chdir=terraform init -backend=false && terraform -chdir=terraform validate
+      - run: pip install ansible-lint pyyaml yamllint
+      - run: ansible-lint ansible/
+      - run: yamllint -d relaxed profiles agents
+      - run: python -m py_compile detect.py infra-mcp/server.py
+      - run: for c in hub dev prod; do kubectl kustomize gitops/clusters/$c > /dev/null; done

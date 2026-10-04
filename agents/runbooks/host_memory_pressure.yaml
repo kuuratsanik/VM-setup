@@ -1,0 +1,7 @@
+alert: HostMemoryPressure
+description: Available host memory below 10% for 10 minutes.
+steps:
+  - tool: host_metrics
+  - tool: vm_list
+verify: report which guest uses the most memory and propose a profile change
+escalate_if: pressure persists after the report

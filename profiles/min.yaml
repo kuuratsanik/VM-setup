@@ -1,0 +1,11 @@
+mgmt_vm: { vcpu: 1, ram_gb: 3, disk_gb: 30 }
+clusters: 1
+servers_per_cluster: 1
+workers_per_cluster: 1
+server_vcpu: 2
+server_ram_gb: 3
+local_llm: { enabled: false, model: null }
+llm_routing: { cloud_budget_usd_month: 20, default_tier: cloud-small }
+monitoring: { scrape_interval: 60s, retention_days: 7, loki: false }
+sandbox: podman
+parallel_agents: 1
