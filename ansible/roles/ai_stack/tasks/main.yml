@@ -1,25 +1,38 @@
-- name: Install container runtime and Python tooling
+- name: Install container runtime, Node (for npx MCP servers) and tooling
   ansible.builtin.apt:
-    name: [podman, python3-venv, python3-pip]
+    name: [podman, python3-venv, python3-pip, nodejs, npm, git, gh, rsync]
     state: present
 
-- name: Create config directory
+- name: Create state directories
   ansible.builtin.file:
-    path: /etc/vmsetup
+    path: "{{ item }}"
     state: directory
     mode: "0750"
+  loop:
+    - /etc/vmsetup
+    - /var/lib/vmsetup
+    - /var/lib/vmsetup/media
+    - /var/lib/vmsetup/pgdata
+    - /var/lib/vmsetup/localai
+    - /var/lib/vmsetup/hf-cache
+    - /var/lib/vmsetup/phoenix
+    - /var/lib/vmsetup/training
 
-- name: Generate gateway key
+- name: Generate gateway key and database password
   ansible.builtin.set_fact:
     ai_stack_master_key: "sk-{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits length=40') }}"
+    ai_stack_pg_password: "{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits length=32') }}"
   no_log: true
 
-- name: Create secrets file (never overwritten)
+- name: Create secrets files (never overwritten)
   ansible.builtin.template:
-    src: secrets.env.j2
-    dest: /etc/vmsetup/secrets.env
+    src: "{{ item.src }}"
+    dest: "/etc/vmsetup/{{ item.dest }}"
     mode: "0600"
     force: false
+  loop:
+    - { src: secrets.env.j2, dest: secrets.env }
+    - { src: pg.env.j2, dest: pg.env }
   no_log: true
 
 - name: Render LiteLLM config
@@ -27,30 +40,110 @@
     src: litellm.yaml.j2
     dest: /etc/vmsetup/litellm.yaml
     mode: "0640"
+  register: ai_stack_litellm_config
 
 - name: Download Ollama installer
   ansible.builtin.get_url:
     url: https://ollama.com/install.sh
     dest: /usr/local/src/ollama-install.sh
     mode: "0755"
-  when: local_llm.enabled and (local_llm.engine | default('ollama')) == 'ollama'
+  when: (local_llm.enabled and ai_stack_engine == 'ollama') or ai_stack_embed_local | bool
 
-- name: Install Ollama when local LLM is enabled
+- name: Install Ollama
   ansible.builtin.command: /usr/local/src/ollama-install.sh
   args:
     creates: /usr/local/bin/ollama
-  when: local_llm.enabled and (local_llm.engine | default('ollama')) == 'ollama'
+  when: (local_llm.enabled and ai_stack_engine == 'ollama') or ai_stack_embed_local | bool
 
-- name: Pull local model
-  ansible.builtin.command: "ollama pull {{ local_llm.model }}"
-  when: local_llm.enabled and (local_llm.engine | default('ollama')) == 'ollama'
+- name: Pull Ollama models
+  ansible.builtin.command: "ollama pull {{ item }}"
+  loop: "{{ ai_stack_ollama_models }}"
   changed_when: true
+
+- name: Check NVIDIA CDI is configured for vLLM
+  ansible.builtin.stat:
+    path: /etc/cdi/nvidia.yaml
+  register: ai_stack_cdi
+  when: local_llm.enabled and ai_stack_engine == 'vllm'
+
+- name: Require NVIDIA container toolkit for vLLM
+  ansible.builtin.fail:
+    msg: "vLLM needs the NVIDIA container toolkit with CDI (run: nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml)."
+  when: local_llm.enabled and ai_stack_engine == 'vllm' and not ai_stack_cdi.stat.exists
+
+- name: Run vLLM
+  containers.podman.podman_container:
+    name: vllm
+    image: docker.io/vllm/vllm-openai:v0.30.0
+    state: started
+    restart_policy: always
+    device: ["nvidia.com/gpu=all"]
+    ipc: host
+    publish: ["127.0.0.1:8000:8000"]
+    volumes:
+      - /var/lib/vmsetup/hf-cache:/root/.cache/huggingface
+    command: >-
+      --model {{ local_llm.model }} --max-model-len 32768
+      --enable-auto-tool-choice --tool-call-parser hermes
+      {% if ai_stack_lora_path | length > 0 %}--enable-lora --lora-modules vmsetup={{ ai_stack_lora_path }}{% endif %}
+  when: local_llm.enabled and ai_stack_engine == 'vllm'
+
+- name: Run Postgres with pgvector
+  containers.podman.podman_container:
+    name: pgvector
+    image: docker.io/pgvector/pgvector:pg17
+    state: started
+    restart_policy: always
+    publish: ["127.0.0.1:5432:5432"]
+    env_file: /etc/vmsetup/pg.env
+    volumes:
+      - /var/lib/vmsetup/pgdata:/var/lib/postgresql/data
+  when: ai_stack_vector_memory | bool
+
+- name: Run Phoenix (self-hosted LLM tracing)
+  containers.podman.podman_container:
+    name: phoenix
+    image: docker.io/arizephoenix/phoenix:version-20.19.0
+    state: started
+    restart_policy: always
+    publish: ["127.0.0.1:6006:6006"]
+    env: { PHOENIX_WORKING_DIR: /mnt/data }
+    volumes:
+      - /var/lib/vmsetup/phoenix:/mnt/data
+  when: ai_stack_phoenix | bool
+
+- name: Run LocalAI (local image, speech and transcription)
+  containers.podman.podman_container:
+    name: localai
+    image: "docker.io/localai/localai:v4.11.0{{ '-gpu-nvidia-cuda-12' if ai_stack_engine == 'vllm' else '' }}"
+    state: started
+    restart_policy: always
+    device: "{{ ['nvidia.com/gpu=all'] if ai_stack_engine == 'vllm' else [] }}"
+    publish: ["127.0.0.1:8080:8080"]
+    env: { MODELS_PATH: /models, LOCALAI_MODELS_PATH: /models }
+    volumes:
+      - /var/lib/vmsetup/localai:/models
+  when: ai_stack_media_local | bool
+
+- name: Install LocalAI models from the gallery
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8080/models/apply
+    method: POST
+    body_format: json
+    body: { id: "{{ item }}" }
+    status_code: [200, 202]
+  loop: "{{ ai_stack_localai_models }}"
+  register: ai_stack_localai_apply
+  until: ai_stack_localai_apply is succeeded
+  retries: 10
+  delay: 6
+  when: ai_stack_media_local | bool
 
 - name: Copy repo to /opt/vm-setup
   ansible.posix.synchronize:
     src: "{{ playbook_dir }}/../"
     dest: /opt/vm-setup/
-    rsync_opts: ["--exclude=.git", "--exclude=.venv"]
+    rsync_opts: ["--exclude=.git", "--exclude=.venv", "--exclude=.terraform", "--exclude=__pycache__"]
 
 - name: Create agent virtualenv
   ansible.builtin.pip:
@@ -58,11 +151,47 @@
     virtualenv: /opt/vm-setup/.venv
     virtualenv_command: python3 -m venv
 
-- name: Install operator agent service
+- name: Initialise vector memory schema
+  ansible.builtin.command: /opt/vm-setup/.venv/bin/python /opt/vm-setup/agents/memory.py init
+  register: ai_stack_memory_init
+  until: ai_stack_memory_init.rc == 0
+  retries: 15
+  delay: 3
+  changed_when: false
+  when: ai_stack_vector_memory | bool
+
+- name: Run LiteLLM gateway
+  containers.podman.podman_container:
+    name: litellm
+    image: ghcr.io/berriai/litellm:main-stable
+    state: started
+    recreate: "{{ ai_stack_litellm_config.changed }}"
+    restart_policy: always
+    network: host
+    volumes: ["/etc/vmsetup/litellm.yaml:/app/config.yaml:ro"]
+    command: ["--config", "/app/config.yaml", "--host", "127.0.0.1"]
+    env_file: /etc/vmsetup/secrets.env
+    env: "{{ {'PHOENIX_COLLECTOR_HTTP_ENDPOINT': 'http://127.0.0.1:6006/v1/traces'} if ai_stack_phoenix | bool else {} }}"
+
+- name: Install agent services and timers
   ansible.builtin.copy:
-    src: vmsetup-agent.service
-    dest: /etc/systemd/system/vmsetup-agent.service
+    src: "{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
     mode: "0644"
+  loop:
+    - vmsetup-agent.service
+    - vmsetup-upgrade.service
+    - vmsetup-upgrade.timer
+    - vmsetup-cost.service
+    - vmsetup-cost.timer
+    - vmsetup-librarian.service
+    - vmsetup-librarian.timer
+    - vmsetup-models.service
+    - vmsetup-models.timer
+    - vmsetup-evolve.service
+    - vmsetup-evolve.timer
+    - vmsetup-deploy.service
+    - vmsetup-deploy.timer
 
 - name: Enable operator agent
   ansible.builtin.systemd:
@@ -71,28 +200,16 @@
     state: started
     daemon_reload: true
 
-- name: Install agent timers
-  ansible.builtin.copy:
-    src: "{{ item }}"
-    dest: "/etc/systemd/system/{{ item }}"
-    mode: "0644"
-  loop: [vmsetup-upgrade.service, vmsetup-upgrade.timer, vmsetup-cost.service, vmsetup-cost.timer]
-
 - name: Enable agent timers
   ansible.builtin.systemd:
     name: "{{ item }}"
     enabled: true
     state: started
     daemon_reload: true
-  loop: [vmsetup-upgrade.timer, vmsetup-cost.timer]
-
-- name: Run LiteLLM gateway
-  containers.podman.podman_container:
-    name: litellm
-    image: ghcr.io/berriai/litellm:main-stable
-    state: started
-    restart_policy: always
-    network: host
-    volumes: ["/etc/vmsetup/litellm.yaml:/app/config.yaml:ro"]
-    command: ["--config", "/app/config.yaml", "--host", "127.0.0.1"]
-    env_file: /etc/vmsetup/secrets.env
+  loop:
+    - vmsetup-upgrade.timer
+    - vmsetup-cost.timer
+    - vmsetup-librarian.timer
+    - vmsetup-models.timer
+    - vmsetup-evolve.timer
+    - vmsetup-deploy.timer

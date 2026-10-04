@@ -1,0 +1,10 @@
+[Unit]
+Description=Evolve agent: propose improvements to the agents' own prompts, runbooks and code (PR only)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vm-setup
+EnvironmentFile=-/etc/vmsetup/secrets.env
+ExecStart=/opt/vm-setup/.venv/bin/python /opt/vm-setup/agents/evolve.py
+TimeoutStartSec=1800

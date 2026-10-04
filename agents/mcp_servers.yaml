@@ -1,0 +1,24 @@
+# MCP servers the Operator may use. Read-only unless noted; only the infra server has mutating tools (dry-run by default).
+servers:
+  infra:
+    command: "{python}"
+    args: ["{root}/infra-mcp/server.py"]
+    env: { VMSETUP_PROFILE: "{root}/profile.generated.json" }
+    allow: ["^(vm_list|host_metrics|vm_snapshot|vm_start|vm_stop)$"]
+
+  # Kubernetes API through the read-only ServiceAccount from gitops/apps/ai-readonly (see scripts/ai_kubeconfig.py).
+  kubernetes:
+    command: npx
+    args: ["-y", "kubernetes-mcp-server@0.0.67", "--read-only", "--kubeconfig", "/etc/vmsetup/ai-kubeconfig.yaml"]
+    requires_file: [/etc/vmsetup/ai-kubeconfig.yaml]
+
+  prometheus:
+    command: "{root}/.venv/bin/prometheus-mcp-server"
+    env: { PROMETHEUS_URL: "http://127.0.0.1:9090" }
+
+  # Argo CD only exists inside the clusters; set ARGOCD_BASE_URL (e.g. a port-forward) and an API token in secrets.env.
+  argocd:
+    command: npx
+    args: ["-y", "argocd-mcp@0.9.0", "stdio"]
+    env: { ARGOCD_BASE_URL: "${ARGOCD_BASE_URL}", ARGOCD_API_TOKEN: "${ARGOCD_API_TOKEN}", MCP_READ_ONLY: "true" }
+    requires_env: [ARGOCD_BASE_URL, ARGOCD_API_TOKEN]

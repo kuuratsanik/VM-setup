@@ -13,6 +13,7 @@ jobs:
       - run: python agents/reviewer.py
         env:
           BASE_REF: origin/${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
           REVIEWER_API_KEY: ${{ secrets.REVIEWER_API_KEY }}
           REVIEWER_MODEL: ${{ vars.REVIEWER_MODEL }}

@@ -1,0 +1,10 @@
+[Unit]
+Description=Deploy agent: roll the running agents forward to approved commits on main, with rollback
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vm-setup
+EnvironmentFile=-/etc/vmsetup/secrets.env
+ExecStart=/opt/vm-setup/.venv/bin/python /opt/vm-setup/agents/deploy.py
+TimeoutStartSec=1800

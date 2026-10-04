@@ -7,8 +7,12 @@ agents:
   capacity:     { autonomy: L2, tier: local-small, output: pull_request, module: agents/capacity.py }
   security:     { autonomy: L0, tier: cloud-mid }
   reviewer:     { autonomy: gate, tier: cloud-frontier, must_differ_from_author_model: true, module: agents/reviewer.py }
-  librarian:    { autonomy: L1, tier: local-small }
+  librarian:    { autonomy: L1, tier: local-small, module: agents/librarian.py, output: pull_request }
   cost:         { autonomy: L1, tier: local-small, module: agents/cost.py }
+  models:       { autonomy: L2, tier: cloud-small, module: agents/models.py, output: pull_request, gate: agents/evalgate.py }
+  evolve:       { autonomy: L2, tier: cloud-frontier, module: agents/evolve.py, output: pull_request, gate: [pytest, agents/evalgate.py] }
+  deploy:       { autonomy: L2, module: agents/deploy.py, rollback: automatic }
+  media:        { autonomy: L0, module: media-mcp/server.py }
 
 profiles:
   min: { enabled: [orchestrator, operator, infra, reviewer], models: cloud-only }
@@ -25,3 +29,9 @@ guardrails:
   kill_switch_file: /etc/vmsetup/AGENTS_PAUSED
   max_steps_per_task: 30
   redact_before_cloud: [secrets, ip_addresses]
+  # Self-modification: agents change themselves only through PRs. Files listed in agents/reviewer.py IMMUTABLE are off limits
+  # to agent-authored PRs, protected paths need the human-approved label, and nothing merges or applies infrastructure on its own.
+  self_modification:
+    max_prs_per_day: 1
+    deploys_only_from: main
+    infrastructure_changes: human_only

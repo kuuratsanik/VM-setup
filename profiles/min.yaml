@@ -5,6 +5,12 @@ workers_per_cluster: 1
 server_vcpu: 2
 server_ram_gb: 3
 local_llm: { enabled: false, model: null }
+ai:
+  embedding_provider: cloud
+  vector_memory: true
+  phoenix: false
+  media: { local: false }
+  training: { enabled: false, max_usd: 20 }
 llm_routing: { cloud_budget_usd_month: 20, default_tier: cloud-small }
 monitoring: { scrape_interval: 60s, retention_days: 7, loki: false }
 sandbox: podman

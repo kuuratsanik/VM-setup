@@ -1,0 +1,10 @@
+# Fine-tuning settings. Training stays off until ai.training.enabled is true in profile.override.yaml.
+base_model: gpt-4o-mini-2024-07-18 # check OpenAI's fine-tuning docs for currently tunable models before running
+epochs: 3
+min_examples: 50
+validation_fraction: 0.1
+price_per_million_tokens_usd: 3.0 # training price of base_model; set from the provider's price list
+local:
+  base_model: NousResearch/Hermes-3-Llama-3.1-8B
+  image: docker.io/axolotlai/axolotl:main-latest
+  work_dir: /var/lib/vmsetup/training

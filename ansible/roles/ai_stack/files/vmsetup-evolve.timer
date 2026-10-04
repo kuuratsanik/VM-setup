@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly Evolve agent
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -7,6 +7,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+import pr
+
 ROOT = Path(__file__).resolve().parent.parent
 PROM = "http://127.0.0.1:9090"
 QUERIES = {
@@ -50,24 +52,12 @@ def main():
         print("capacity: no change proposed")
         return
 
-    body = "# Capacity proposal\n\n" + "\n".join(f"- {f}" for f in findings) + f"\n\nMetrics: `{json.dumps(metrics)}`\n"
     stamp = datetime.date.today().isoformat()
-    path = ROOT / "proposals" / f"capacity-{stamp}.md"
-    path.parent.mkdir(exist_ok=True)
-    path.write_text(body)
+    body = "# Capacity proposal\n\n" + "\n".join(f"- {f}" for f in findings) + f"\n\nMetrics: `{json.dumps(metrics)}`\n"
     print(body)
-    # Proposal only: opening a PR needs gh auth; resizing is L3 and always reviewed by a human.
-    branch = f"agent/capacity-{stamp}"
-    for cmd in (
-        ["git", "checkout", "-b", branch],
-        ["git", "add", str(path)],
-        ["git", "commit", "-m", f"capacity: proposal {stamp}"],
-        ["git", "push", "-u", "origin", branch],
-        ["gh", "pr", "create", "--title", f"Capacity proposal {stamp}", "--body", body, "--label", "agent"],
-    ):
-        if subprocess.run(cmd, cwd=ROOT).returncode != 0:
-            print(f"capacity: stopped at {' '.join(cmd[:2])}; proposal left in {path}")
-            break
+    # Proposal only: resizing is L3 and always reviewed by a human.
+    url = pr.open_pr(f"agent/capacity-{stamp}", {f"proposals/capacity-{stamp}.md": body}, f"Capacity proposal {stamp}", body)
+    print(f"capacity: {url or 'proposal already up to date'}")
 
 
 if __name__ == "__main__":

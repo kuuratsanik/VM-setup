@@ -2,3 +2,4 @@ resources:
   - ../../apps/cert-manager
   - ../../apps/sealed-secrets
   - ../../apps/system-upgrade-controller
+  - ../../apps/ai-readonly
