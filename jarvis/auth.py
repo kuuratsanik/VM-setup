@@ -42,11 +42,27 @@ def totp_enabled():
     return bool(doc and doc.get("totp_secret") and doc.get("totp_confirmed"))
 
 
+def session_gen():
+    """Current session generation; a cookie is valid only while it carries this number."""
+    doc = _load()
+    return int(doc.get("session_gen", 0)) if doc else 0
+
+
+def bump_session_gen():
+    """Invalidate every session cookie issued so far (logout, password change)."""
+    doc = _load()
+    if doc is None:
+        return 0
+    doc["session_gen"] = int(doc.get("session_gen", 0)) + 1
+    _save(doc)
+    return doc["session_gen"]
+
+
 def set_password(username, password):
     if len(password) < 12:
         raise ValueError("password must be at least 12 characters")
     doc = _load() or {}
-    doc.update({"username": username, "password_hash": _hasher.hash(password)})
+    doc.update({"username": username, "password_hash": _hasher.hash(password), "session_gen": int(doc.get("session_gen", 0)) + 1})
     _save(doc)
 
 

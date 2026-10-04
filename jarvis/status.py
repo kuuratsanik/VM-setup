@@ -58,25 +58,42 @@ async def prom_value(client, query):
         return None
 
 
-def recent_incidents(limit=25):
-    if not INCIDENTS.exists():
+def _rows():
+    """Parsed incident rows; truncated, invalid or non-object lines are skipped."""
+    try:
+        lines = INCIDENTS.read_text(errors="replace").splitlines()
+    except OSError:
         return []
-    rows = [json.loads(line) for line in INCIDENTS.read_text().splitlines() if line][-limit:]
-    return [{"ts": r["ts"], "alert": r["alert"], "outcome": r["outcome"], "detail": (r.get("detail") or "")[:300], "model": r.get("model")} for r in reversed(rows)]
+    rows = []
+    for line in lines:
+        try:
+            row = json.loads(line) if line.strip() else None
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def recent_incidents(limit=25):
+    rows = _rows()[-limit:]
+    return [{"ts": r.get("ts"), "alert": r.get("alert") or "unknown", "outcome": r.get("outcome") or "unknown", "detail": str(r.get("detail") or "")[:300], "model": r.get("model")} for r in reversed(rows)]
 
 
 def spend(days=30):
     total, tokens = 0.0, 0
     since = time.time() - days * 86400
-    if INCIDENTS.exists():
-        for line in INCIDENTS.read_text().splitlines():
-            row = json.loads(line) if line else None
-            if not row or row["ts"] < since or not row.get("usage"):
-                continue
-            p_in, p_out = PRICES.get(row.get("model") or "default", PRICES["cloud-frontier"])
-            u = row["usage"]
-            total += (u["prompt_tokens"] * p_in + u["completion_tokens"] * p_out) / 1e6
-            tokens += u["prompt_tokens"] + u["completion_tokens"]
+    for row in _rows():
+        usage = row.get("usage")
+        ts = row.get("ts")
+        if not isinstance(usage, dict) or not isinstance(ts, (int, float)) or ts < since:
+            continue
+        p_in, p_out = PRICES.get(row.get("model") or "default", PRICES["cloud-frontier"])
+        prompt, completion = usage.get("prompt_tokens") or 0, usage.get("completion_tokens") or 0
+        if not isinstance(prompt, (int, float)) or not isinstance(completion, (int, float)):
+            continue
+        total += (prompt * p_in + completion * p_out) / 1e6
+        tokens += prompt + completion
     budget = (profile().get("llm_routing") or {}).get("cloud_budget_usd_month")
     return {"estimated_usd_30d": round(total, 4), "tokens_30d": tokens, "budget_usd_month": budget}
 

@@ -3,6 +3,7 @@
 Accounts are created by the human. Jarvis never automates registration, CAPTCHA, email or phone verification; it opens the
 right pages, explains each step, checks the pasted token with a harmless read-only call, and stages it.
 """
+import asyncio
 import json
 import os
 import re
@@ -103,7 +104,7 @@ def clean(provider, values):
 async def validate(provider, values, transport=None, runner=subprocess.run):
     values = clean(provider, values)
     if provider == "kaggle":
-        return _check_kaggle(values, runner)
+        return await asyncio.to_thread(_check_kaggle, values, runner)
     return await _check(provider, values, transport)
 
 

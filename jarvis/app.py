@@ -1,5 +1,6 @@
 """Jarvis web dashboard: login, status, chat with tools, voice and image, provider setup, and GPU compute."""
 import os
+import subprocess
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -18,7 +19,7 @@ sys.path.insert(0, str(ROOT / "agents"))
 from jarvis import auth, providers, status  # noqa: E402
 import approvals  # noqa: E402
 from policy import Policy  # noqa: E402
-from jarvis.chat import Chat, Hub, contains_secret  # noqa: E402
+from jarvis.chat import ActionInProgress, Chat, Hub, history_has_secret  # noqa: E402
 from jarvis.compute.runpod import GPUS  # noqa: E402
 from jarvis.compute.service import Compute, NotConfigured  # noqa: E402
 
@@ -90,14 +91,22 @@ def create_app(compute=None, hub=None, start_tools=True):
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    def session_user(request: Request):
+        """The logged-in user, only if the cookie carries the current server-side session generation."""
+        user, gen = request.session.get("user"), request.session.get("gen")
+        if not user or gen != auth.session_gen():
+            return None
+        return user
+
     def owner(request: Request):
-        if not request.session.get("user"):
+        user = session_user(request)
+        if not user:
             raise HTTPException(401, "login required")
-        return request.session["user"]
+        return user
 
     @app.get("/api/auth/state")
     async def auth_state(request: Request):
-        return {"configured": auth.configured(), "logged_in": bool(request.session.get("user")), "totp": auth.totp_enabled()}
+        return {"configured": auth.configured(), "logged_in": bool(session_user(request)), "totp": auth.totp_enabled()}
 
     @app.post("/api/login")
     async def login(body: Login, request: Request):
@@ -110,17 +119,17 @@ def create_app(compute=None, hub=None, start_tools=True):
             raise HTTPException(401, "invalid credentials")
         request.session.clear()
         request.session["user"] = body.username
+        request.session["gen"] = auth.session_gen()
         return {"ok": True}
 
     @app.post("/api/logout")
     async def logout(request: Request):
+        if session_user(request):  # only a valid session may revoke; this also kills any stolen copy of the cookie
+            auth.bump_session_gen()
         request.session.clear()
         return {"ok": True}
 
-    @app.post("/api/totp/enroll")
-    async def totp_enroll(user: str = Depends(owner)):
-        secret_, uri = auth.enroll_totp()
-        return {"secret": secret_, "uri": uri}
+    # TOTP enrollment is host-only (`python -m jarvis.manage enroll-totp`); there is deliberately no HTTP endpoint for it.
 
     @app.post("/api/totp/confirm")
     async def totp_confirm(body: dict, user: str = Depends(owner)):
@@ -155,7 +164,7 @@ def create_app(compute=None, hub=None, start_tools=True):
         last = next((m for m in reversed(body.messages) if m.get("role") == "user"), None)
         if last is None or body.model not in MODELS:
             raise HTTPException(400, "bad request")
-        if any(contains_secret(str(m.get("content", ""))) for m in body.messages):
+        if history_has_secret(body.messages):
             raise HTTPException(400, "that looks like a key or token; enter it in the Setup tab, not in chat")
 
         async def events():
@@ -174,6 +183,8 @@ def create_app(compute=None, hub=None, start_tools=True):
             return {"result": await hub.confirm(pid)}
         except KeyError:
             raise HTTPException(404, "unknown or expired action")
+        except ActionInProgress:
+            raise HTTPException(409, "that action is already being confirmed")
         except Exception as exc:  # NotConfigured, SpendGuard, provider errors: tell the owner why
             raise HTTPException(400, str(exc)[:300])
 
@@ -220,7 +231,11 @@ def create_app(compute=None, hub=None, start_tools=True):
             values = providers.clean(pid, body.values)
         except ValueError as exc:
             raise HTTPException(400, str(exc))
-        if not await providers.validate(pid, values):
+        try:
+            valid = await providers.validate(pid, values)
+        except (httpx.HTTPError, subprocess.TimeoutExpired, FileNotFoundError):
+            raise HTTPException(502, "could not reach the provider to check that key; try again later")
+        if not valid:
             raise HTTPException(400, "the provider rejected that key")
         providers.stage(values)
         return {"staged": True, "note": "Applied by the root helper within a minute; services restart."}
