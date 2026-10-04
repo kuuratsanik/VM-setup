@@ -49,3 +49,16 @@ def test_pr_helper_rejects_paths_outside_repo(tmp_path, monkeypatch):
     except ValueError:
         return
     raise AssertionError("path escape was not rejected")
+
+
+def test_reviewer_requires_label_for_infra_paths():
+    for path in ("terraform/main.tf", "gitops/clusters/hub/kustomization.yaml", "ansible/site.yml", "bootstrap.sh", "scripts/kubeconfig.sh",
+                 "profiles/std.yaml", "detect.py"):
+        problems = reviewer.policy_problems([path], "", set(), "feature/x")
+        assert any("protected paths changed without the 'human-approved' label" in p for p in problems), path
+        assert not reviewer.policy_problems([path], "", {"human-approved"}, "feature/x"), path
+
+
+def test_reviewer_tier0_still_needs_no_label():
+    for path in ("agents/runbooks/new.yaml", "proposals/idea.md"):
+        assert not reviewer.policy_problems([path], "", set(), "agent/evolve-1"), path

@@ -42,7 +42,7 @@ If a node never becomes `Ready`: `sudo journalctl -u k3s -u k3s-agent` on the no
 - Also on `hub`: Loki + Alloy (logs, wired into Grafana), Kyverno audit policies. On all clusters: system-upgrade-controller with k3s `stable` channel plans (auto-upgrades servers then agents, one node at a time). Optional: Velero (set bucket and a `velero-credentials` SealedSecret first).
 - `agents/`: `runtime.py` (Operator, multi-MCP via `mcp_servers.yaml`), `capacity.py`, `upgrade.py`, `cost.py`, `librarian.py`, `models.py`, `evolve.py`, `deploy.py`, `reviewer.py` (PR gate). Prompts live in `agents/prompts/`, runbooks in `agents/runbooks/`.
 - `evals/cases.yaml` + `agents/evalgate.py`: tool-choice and prompt-injection cases that gate model, prompt and tuned-model changes. `evals/promptfooconfig.yaml` is an optional promptfoo version.
-- `tests/`: unit tests (`python -m pytest -q tests`), run in CI.
+- `tests/`: unit tests (`python -m pytest -q tests`), run in CI. The browser test for the Jarvis UI (`tests/e2e`) needs `pip install playwright && python -m playwright install chromium`, then `python -m pytest -q tests/e2e`; without Playwright it is skipped.
 - `media-mcp/`: MCP server for image, speech, transcription, vision and video through the gateway.
 - `training/`: dataset export, hybrid fine-tuning (cloud or local LoRA) and two-stage promotion.
 - `jarvis/`: the Jarvis web dashboard (see below).
