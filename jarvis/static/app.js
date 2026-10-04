@@ -13,11 +13,18 @@ const h = (tag, attrs = {}, ...kids) => {
 const api = async (path, opts = {}) => {
   const res = await fetch(path, { credentials: "same-origin", ...opts, headers: { "X-Requested-With": "jarvis", ...(opts.json ? { "Content-Type": "application/json" } : {}), ...(opts.headers || {}) }, body: opts.json ? JSON.stringify(opts.json) : opts.body });
   if (res.status === 401 && path !== "/api/login") { showLogin(); throw new Error("login required"); }
-  if (!res.ok) { let d = res.statusText; try { d = (await res.json()).detail || d; } catch {} throw new Error(d); }
+  if (!res.ok) {
+    let d = res.statusText;
+    try { const x = (await res.json()).detail; if (x) d = Array.isArray(x) ? x.map((i) => (i && i.msg) || String(i)).join("; ") : typeof x === "string" ? x : JSON.stringify(x); } catch {}
+    const err = new Error(d); err.status = res.status; throw err;
+  }
   return res;
 };
 const getJSON = async (p) => (await api(p)).json();
 const post = async (p, json) => (await api(p, { method: "POST", json: json ?? {} })).json();
+// A confirm/discard that finds the action claimed or gone (409/404) was handled by an earlier request.
+const settled = (e) => e.status === 409 || e.status === 404;
+const failText = (e) => (settled(e) ? "already handled" : e.message);
 
 const TABS = ["Overview", "Chat", "Autonomy", "Compute", "Setup", "Incidents"];
 let current = "Overview";
@@ -32,7 +39,13 @@ function buildTabs() {
 function open(t) {
   current = t; buildTabs();
   for (const name of TABS) $("tab-" + name.toLowerCase()).classList.toggle("hidden", name !== t);
-  ({ Overview: renderOverview, Autonomy: renderAutonomy, Compute: renderCompute, Setup: renderSetup, Incidents: renderIncidents }[t] || (() => {}))();
+  runTab(t);
+}
+const RENDERERS = { Overview: renderOverview, Autonomy: renderAutonomy, Compute: renderCompute, Setup: renderSetup, Incidents: renderIncidents };
+async function runTab(t, ...args) {
+  const fn = RENDERERS[t]; if (!fn) return;
+  try { await fn(...args); }
+  catch (e) { if (e.message !== "login required") $("tab-" + t.toLowerCase()).replaceChildren(h("p", { class: "err" }, "Error: " + e.message)); }
 }
 
 async function renderOverview() {
@@ -63,17 +76,32 @@ async function speakServer(text) { const r = await api("/api/tts", { method: "PO
 function pendingCard(ev) {
   const card = h("div", { class: "pending" }, h("div", {}, "Jarvis proposes: ", ev.name, " ", JSON.stringify(ev.args)));
   const out = h("div", { class: "muted" });
-  card.append(
-    h("button", { onclick: async () => { try { out.textContent = JSON.stringify((await post(`/api/actions/${ev.id}/confirm`)).result); } catch (e) { out.textContent = e.message; } } }, "Confirm"),
-    " ", h("button", { class: "secondary", onclick: async () => { await post(`/api/actions/${ev.id}/discard`); card.remove(); } }, "Discard"), out);
+  const ok = h("button", {}, "Confirm"); const no = h("button", { class: "secondary" }, "Discard");
+  const run = async (verb) => {
+    ok.disabled = no.disabled = true;
+    try {
+      const r = await post(`/api/actions/${ev.id}/${verb}`);
+      if (verb === "discard") { card.remove(); return; }
+      out.textContent = JSON.stringify(r.result ?? "done"); // success: buttons stay disabled
+    } catch (e) {
+      out.textContent = failText(e);
+      if (!settled(e)) ok.disabled = no.disabled = false; // still pending, allow retry
+    }
+  };
+  ok.addEventListener("click", () => run("confirm")); no.addEventListener("click", () => run("discard"));
+  card.append(ok, " ", no, out);
   log().append(card);
 }
 
 async function send(text) {
   line("user", text); history.push({ role: "user", content: text });
   const reply = line("assistant", ""); let full = "";
+  const mine = history[history.length - 1];
   try {
-    const res = await api("/api/chat", { method: "POST", json: { messages: history, model: $("model").value, tools: $("use-tools").checked } });
+    let msgs = history.slice(-30); while (msgs.length && msgs[0].role !== "user") msgs.shift();
+    let res;
+    try { res = await api("/api/chat", { method: "POST", json: { messages: msgs, model: $("model").value, tools: $("use-tools").checked } }); }
+    catch (e) { const i = history.indexOf(mine); if (i >= 0) history.splice(i, 1); throw e; } // rejected message must not poison later sends
     const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
     for (;;) {
       const { done, value } = await reader.read(); if (done) break;
@@ -106,8 +134,13 @@ async function startMic() {
   const r = new SR(); r.onresult = (e) => send(e.results[0][0].transcript); r.start();
 }
 
+let chatWired = false;
 async function initChat() {
-  for (const m of await getJSON("/api/models")) $("model").append(h("option", {}, m));
+  const models = await getJSON("/api/models"); const sel = $("model"); const prev = sel.value;
+  sel.replaceChildren(...models.map((m) => h("option", {}, m)));
+  if (prev && models.includes(prev)) sel.value = prev;
+  if (chatWired) return;
+  chatWired = true;
   $("chat-form").addEventListener("submit", (e) => { e.preventDefault(); const t = $("msg").value.trim(); if (t) { $("msg").value = ""; send(t); } });
   $("mic").addEventListener("click", () => startMic().catch((e) => line("tool", e.message)));
   $("img").addEventListener("click", async () => {
@@ -117,10 +150,17 @@ async function initChat() {
 }
 
 /* ---- autonomy ---- */
-async function renderAutonomy() {
+async function renderAutonomy(msg = "") {
   const a = await getJSON("/api/autonomy");
-  const note = h("p", { class: "muted" });
-  const act = (id, verb) => async () => { try { note.textContent = JSON.stringify((await post(`/api/actions/${id}/${verb}`)).result ?? "done"); } catch (e) { note.textContent = e.message; } renderAutonomy(); };
+  const note = h("p", { class: "muted" }, msg);
+  const act = (id, verb) => async (ev) => {
+    const cell = ev.currentTarget.parentElement; const btns = [...cell.querySelectorAll("button")];
+    btns.forEach((b) => { b.disabled = true; });
+    let text;
+    try { text = JSON.stringify((await post(`/api/actions/${id}/${verb}`)).result ?? "done"); }
+    catch (e) { text = failText(e); if (!settled(e)) { btns.forEach((b) => { b.disabled = false; }); note.textContent = text; return; } }
+    await runTab("Autonomy", text); // re-render first; message goes on the new element
+  };
   $("tab-autonomy").replaceChildren(
     h("div", { class: "grid" },
       h("div", { class: "card" }, h("h3", {}, "Mode"), h("div", {}, a.mode), h("div", { class: "muted" }, "Changed only by a reviewed PR to agents/autonomy.yaml"), h("div", { class: "err" }, a.error || "")),
@@ -137,20 +177,33 @@ async function renderAutonomy() {
 }
 
 /* ---- compute ---- */
-async function renderCompute() {
+async function renderCompute(msgText = "") {
   const box = $("tab-compute"); const gpus = await getJSON("/api/compute/gpus"); const msg = h("p", { class: "muted" });
+  const result = h("p", {}, msgText);
   let pods = [];
   try { pods = await getJSON("/api/compute/runpod/pods"); } catch (e) { msg.textContent = "RunPod: " + e.message; }
   const name = h("input", { placeholder: "name (a-z, 0-9, -)" }); const gpu = h("select", {}, ...gpus.map((g) => h("option", {}, g))); const hours = h("input", { type: "number", value: "2", min: "0.5", step: "0.5" });
   const slug = h("input", { placeholder: "kaggle slug" }); const code = h("textarea", { placeholder: "Python script to run on a Kaggle GPU (private, internet off)" });
-  const result = h("p", {});
+  // Confirm button: disabled while in flight; re-enabled only if the action is still pending.
+  const confirmBtn = (label, id, rerender) => h("button", { type: "button", onclick: async (ev) => {
+    const b = ev.currentTarget; b.disabled = true;
+    let text;
+    try { text = JSON.stringify((await post(`/api/actions/${id}/confirm`)).result ?? "done"); }
+    catch (er) { text = failText(er); if (!settled(er)) { b.disabled = false; result.textContent = text; return; } }
+    if (rerender) await runTab("Compute", text); else result.textContent = text; // re-render first, then show the message on the new element
+  } }, label);
   box.replaceChildren(
     h("h3", {}, "RunPod (paid, hourly cap and auto-terminate apply)"), msg,
     h("table", {}, h("tr", {}, ...["Pod", "Status", "$/h", "Image", ""].map((c) => h("th", {}, c))),
-      ...pods.map((p) => h("tr", {}, h("td", {}, p.name), h("td", {}, p.desiredStatus), h("td", {}, p.costPerHr), h("td", {}, p.image), h("td", {}, h("button", { class: "danger", onclick: async () => { await post(`/api/compute/runpod/pods/${p.id}/terminate`); renderCompute(); } }, "Terminate"))))),
-    h("form", { onsubmit: async (e) => { e.preventDefault(); const r = await post("/api/compute/runpod/pods", { name: name.value, gpu_type: gpu.value, hours: Number(hours.value) }); result.textContent = ""; result.append("Proposed. ", h("button", { type: "button", onclick: async () => { try { result.textContent = JSON.stringify((await post(`/api/actions/${r.pending}/confirm`)).result); } catch (er) { result.textContent = er.message; } renderCompute(); } }, "Confirm rent")); } }, name, gpu, hours, h("button", {}, "Propose pod")),
+      ...pods.map((p) => h("tr", {}, h("td", {}, p.name), h("td", {}, p.desiredStatus), h("td", {}, p.costPerHr), h("td", {}, p.image), h("td", {}, h("button", { class: "danger", onclick: async (ev) => {
+        if (!confirm(`Terminate pod ${p.name}? This deletes it.`)) return;
+        const b = ev.currentTarget; b.disabled = true;
+        try { await post(`/api/compute/runpod/pods/${p.id}/terminate`); await runTab("Compute", "Terminated " + p.name); }
+        catch (e) { b.disabled = false; result.textContent = "Terminate failed: " + e.message; }
+      } }, "Terminate"))))),
+    h("form", { onsubmit: async (e) => { e.preventDefault(); let r; try { r = await post("/api/compute/runpod/pods", { name: name.value, gpu_type: gpu.value, hours: Number(hours.value) }); } catch (er) { result.textContent = er.message; return; } result.textContent = ""; result.append("Proposed. ", confirmBtn("Confirm rent", r.pending, true)); } }, name, gpu, hours, h("button", {}, "Propose pod")),
     h("h3", {}, "Kaggle (free GPU, weekly quota)"),
-    h("form", { onsubmit: async (e) => { e.preventDefault(); const r = await post("/api/compute/kaggle/run", { slug: slug.value, code: code.value, gpu: true }); result.textContent = ""; result.append("Proposed. ", h("button", { type: "button", onclick: async () => { try { result.textContent = JSON.stringify((await post(`/api/actions/${r.pending}/confirm`)).result); } catch (er) { result.textContent = er.message; } } }, "Confirm run")); } }, slug, code, h("button", {}, "Propose run")),
+    h("form", { onsubmit: async (e) => { e.preventDefault(); let r; try { r = await post("/api/compute/kaggle/run", { slug: slug.value, code: code.value, gpu: true }); } catch (er) { result.textContent = er.message; return; } result.textContent = ""; result.append("Proposed. ", confirmBtn("Confirm run", r.pending, false)); } }, slug, code, h("button", {}, "Propose run")),
     result);
 }
 
@@ -178,5 +231,5 @@ $("logout").addEventListener("click", async () => { await post("/api/logout"); l
   const s = await (await fetch("/api/auth/state")).json();
   if (!s.configured) $("login-note").textContent = "No account yet. On the host run: python -m jarvis.manage set-password";
   if (s.logged_in) { await initChat(); showApp(); } else showLogin();
-  setInterval(() => current === "Overview" && !$("app").classList.contains("hidden") && renderOverview().catch(() => {}), 15000);
+  setInterval(() => current === "Overview" && !$("app").classList.contains("hidden") && runTab("Overview"), 15000);
 })();

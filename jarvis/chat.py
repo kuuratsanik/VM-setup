@@ -41,6 +41,15 @@ def contains_secret(text):
     return bool(SECRET_RE.search(text or ""))
 
 
+def history_has_secret(messages):
+    """Only the owner's own turns are screened; an assistant answer may legitimately quote e.g. a PEM header."""
+    return any(m.get("role") == "user" and contains_secret(str(m.get("content", ""))) for m in messages)
+
+
+class ActionInProgress(Exception):
+    """Another request already claimed this approval."""
+
+
 class Hub:
     """MCP tools from agents/mcp_servers.yaml plus the compute tools, behind one call interface."""
 
@@ -100,6 +109,7 @@ class Hub:
         if not route or route[0] != "infra":
             raise RuntimeError("the infra tools are not available in Jarvis right now")
         session = route[1]
+        claimed = self._claim(pid)  # from here on exactly one caller owns this approval
 
         async def call(tool, a):
             try:
@@ -108,9 +118,42 @@ class Hub:
             except Exception as exc:
                 return False, f"error: {exc}"
 
-        outcome = await gate(Policy(), call, doc["action"], doc["target"], doc["args"], actor="owner", context={"source": "approval"}, confirmed=True)
-        approvals.finish(pid, outcome.status, outcome.text)
+        try:
+            outcome = await gate(Policy(), call, doc["action"], doc["target"], doc["args"], actor="owner", context={"source": "approval"}, confirmed=True)
+        except BaseException as exc:
+            self._finish_claimed(pid, claimed, "error", f"error: {exc}")
+            raise
+        self._finish_claimed(pid, claimed, outcome.status, outcome.text)
         return outcome.text
+
+    @staticmethod
+    def _claim(pid):
+        """Atomically take ownership of a pending approval by renaming its file out of the pending set.
+        rename(2) succeeds for exactly one caller, across requests and processes."""
+        base = approvals._dir("approvals")
+        src, dst = base / f"{pid}.json", base / f"{pid}.claimed"
+        try:
+            os.rename(src, dst)
+        except FileNotFoundError:
+            if dst.exists():
+                raise ActionInProgress(pid)
+            raise KeyError("unknown or expired action")
+        return dst
+
+    @staticmethod
+    def _finish_claimed(pid, claimed, status, result):
+        """Same record approvals.finish writes, taken from the claimed file."""
+        try:
+            doc = json.loads(claimed.read_text())
+        except (OSError, ValueError):
+            doc = {"id": pid}
+        doc.update({"status": status, "result": str(result)[:500], "finished": time.time()})
+        old = os.umask(0o007)
+        try:
+            (approvals._dir("approvals-done") / f"{pid}.json").write_text(json.dumps(doc))
+        finally:
+            os.umask(old)
+        claimed.unlink(missing_ok=True)
 
     def discard(self, pid):
         if self.pending.pop(pid, None) is not None:
