@@ -60,9 +60,10 @@ class Hub:
     def __init__(self, compute):
         self.compute, self.routes, self.specs, self.stack = compute, {}, [], None
         self.pending = {}
+        self.inflight, self.discarded = set(), set()  # compute ids being executed / discarded meanwhile
 
     async def start(self):
-        self.sweep_claimed()
+        self.sweep_claimed(max_age=0)  # a fresh process cannot have a live confirm, so every claim is an orphan
         self.stack = AsyncExitStack()
         self.routes, self.specs = await runtime.connect_servers(self.stack)
         for name, (desc, props, _) in LOCAL_TOOLS.items():
@@ -106,11 +107,16 @@ class Hub:
         self._expire()
         item = self.pending.pop(pid, None)
         if item is not None:
+            self.inflight.add(pid)
             try:
                 return await self.execute(item["name"], item["args"])
             except Exception:  # the pop above is synchronous (double-click safe); a failed run must stay retryable
-                self.pending[pid] = item
+                if pid not in self.discarded:  # unless the owner discarded it while it ran
+                    self.pending[pid] = item
                 raise
+            finally:
+                self.inflight.discard(pid)
+                self.discarded.discard(pid)
         doc = approvals.get(pid)
         if doc is None:
             raise KeyError("unknown or expired action")
@@ -188,6 +194,9 @@ class Hub:
         return n
 
     def discard(self, pid):
+        if pid in self.inflight:
+            self.discarded.add(pid)
+            return True
         if self.pending.pop(pid, None) is not None:
             return True
         try:

@@ -171,7 +171,6 @@ def test_totp_cannot_be_downgraded_over_http(client):
     assert auth.totp_enabled()
     assert client.post("/api/totp/enroll", headers=H).status_code in (404, 405)
     assert auth.totp_enabled()
-    auth.enroll_totp  # host-side API remains; HTTP cannot reach it
 
 
 def test_chat_secret_check_applies_to_user_turns_only():
@@ -421,3 +420,33 @@ async def test_tool_results_are_redacted_before_going_back_to_the_model(monkeypa
     [e async for e in c.run([{"role": "user", "content": "hi"}], "default")]
     tool_msgs = [m for m in captured[1] if m["role"] == "tool"]
     assert tool_msgs and secret not in tool_msgs[0]["content"]
+
+
+def test_sweep_with_max_age_zero_catches_a_just_created_claim(tmp_path, monkeypatch):
+    import approvals
+
+    monkeypatch.setattr(approvals, "STATE_DIR", tmp_path / "auto")
+    f = approvals._dir("approvals") / "young01.claimed"
+    f.write_text(json.dumps({"id": "young01"}))
+    assert Hub.sweep_claimed() == 0 and f.exists()
+    assert Hub.sweep_claimed(max_age=0) == 1 and not f.exists()
+    assert json.loads((tmp_path / "auto" / "approvals-done" / "young01.json").read_text())["status"] == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_discard_during_failing_compute_confirm_is_not_resurrected():
+    import asyncio
+
+    class Slow(FakeCompute):
+        async def run(self, name, args):
+            await asyncio.sleep(0.05)
+            raise RuntimeError("boom")
+
+    hub = Hub(Slow())
+    pid = hub.queue("runpod_create_pod", {"name": "t"})
+    task = asyncio.create_task(hub.confirm(pid))
+    await asyncio.sleep(0.01)
+    assert hub.discard(pid) is True
+    with pytest.raises(RuntimeError):
+        await task
+    assert pid not in hub.pending and not hub.inflight and not hub.discarded
