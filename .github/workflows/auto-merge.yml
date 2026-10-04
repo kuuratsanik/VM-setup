@@ -1,0 +1,21 @@
+name: auto-merge
+# Merges agent PRs that touch only low-risk files (see reviewer.TIER0) after ci and agent-review are green.
+# It runs the default-branch copy of the script and never executes PR code.
+on:
+  workflow_run:
+    workflows: [ci, agent-review]
+    types: [completed]
+
+jobs:
+  merge:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: python agents/automerge.py --sha ${{ github.event.workflow_run.head_sha }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}

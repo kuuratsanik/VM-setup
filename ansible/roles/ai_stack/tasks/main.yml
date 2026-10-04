@@ -192,6 +192,8 @@
     - vmsetup-evolve.timer
     - vmsetup-deploy.service
     - vmsetup-deploy.timer
+    - vmsetup-digest.service
+    - vmsetup-digest.timer
 
 - name: Enable operator agent
   ansible.builtin.systemd:
@@ -213,3 +215,4 @@
     - vmsetup-models.timer
     - vmsetup-evolve.timer
     - vmsetup-deploy.timer
+    - vmsetup-digest.timer

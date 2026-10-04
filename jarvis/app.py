@@ -16,6 +16,8 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "agents"))
 
 from jarvis import auth, providers, status  # noqa: E402
+import approvals  # noqa: E402
+from policy import Policy  # noqa: E402
 from jarvis.chat import Chat, Hub, contains_secret  # noqa: E402
 from jarvis.compute.runpod import GPUS  # noqa: E402
 from jarvis.compute.service import Compute, NotConfigured  # noqa: E402
@@ -133,6 +135,16 @@ def create_app(compute=None, hub=None, start_tools=True):
     @app.get("/api/incidents")
     async def incidents(user: str = Depends(owner)):
         return status.recent_incidents()
+
+    @app.get("/api/autonomy")
+    async def autonomy(user: str = Depends(owner)):
+        policy = Policy()
+        return {**policy.snapshot(), "approvals": approvals.pending(), "audit_tail": list(reversed(policy.audit_tail(25)))}
+
+    @app.post("/api/autonomy/breaker/reset")
+    async def breaker_reset(user: str = Depends(owner)):
+        Policy().reset_breaker(user)
+        return {"ok": True}
 
     @app.get("/api/models")
     async def models(user: str = Depends(owner)):

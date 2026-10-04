@@ -13,6 +13,8 @@ agents:
   evolve:       { autonomy: L2, tier: cloud-frontier, module: agents/evolve.py, output: pull_request, gate: [pytest, agents/evalgate.py] }
   deploy:       { autonomy: L2, module: agents/deploy.py, rollback: automatic }
   media:        { autonomy: L0, module: media-mcp/server.py }
+  digest:       { autonomy: L0, module: agents/digest.py }
+  automerge:    { autonomy: L2, module: agents/automerge.py, scope: low-risk files only (reviewer.TIER0) }
 
 profiles:
   min: { enabled: [orchestrator, operator, infra, reviewer], models: cloud-only }
@@ -35,3 +37,5 @@ guardrails:
     max_prs_per_day: 1
     deploys_only_from: main
     infrastructure_changes: human_only
+  # State-changing infra actions: mode, levels, budgets and breaker are in agents/autonomy.yaml (human-only changes).
+  autonomy_policy: agents/autonomy.yaml

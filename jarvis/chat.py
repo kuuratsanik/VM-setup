@@ -14,7 +14,10 @@ from openai import AsyncOpenAI
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "agents"))
 
-import runtime  # noqa: E402  (connect_servers, MUTATING, LIVE)
+import runtime  # noqa: E402  (connect_servers, MUTATING)
+import approvals  # noqa: E402
+from actions import gate  # noqa: E402
+from policy import Policy  # noqa: E402
 from redact import redact  # noqa: E402
 
 PROMPT = (ROOT / "jarvis/prompts/jarvis.txt").read_text().strip()
@@ -68,11 +71,14 @@ class Hub:
             return "error: unknown tool"
         server, session, tool = self.routes[name]
         if server == "infra" and tool in runtime.MUTATING:
-            args = {**args, "dry_run": not runtime.LIVE}
+            raise PermissionError("state-changing tools run only through confirmed approvals")
         return str((await session.call_tool(tool, args)).content)[:4000]
 
     def queue(self, name, args):
         self._expire()
+        route = self.routes.get(name)
+        if route and route[0] == "infra" and route[2] in runtime.MUTATING:  # shared, persistent queue (also shown in the Autonomy tab)
+            return approvals.queue(name, str(args.get("domain", "")), {k: v for k, v in args.items() if k != "dry_run"}, {"source": "jarvis chat"})
         pid = secrets.token_urlsafe(8)
         self.pending[pid] = {"name": name, "args": args, "ts": time.time()}
         return pid
@@ -82,14 +88,37 @@ class Hub:
         self.pending = {k: v for k, v in self.pending.items() if now - v["ts"] < PENDING_TTL_S}
 
     async def confirm(self, pid):
+        """Run an action the owner approved: compute actions directly, infra actions through the policy as human-confirmed."""
         self._expire()
         item = self.pending.pop(pid, None)
-        if item is None:
+        if item is not None:
+            return await self.execute(item["name"], item["args"])
+        doc = approvals.get(pid)
+        if doc is None:
             raise KeyError("unknown or expired action")
-        return await self.execute(item["name"], item["args"])
+        route = self.routes.get(doc["action"])
+        if not route or route[0] != "infra":
+            raise RuntimeError("the infra tools are not available in Jarvis right now")
+        session = route[1]
+
+        async def call(tool, a):
+            try:
+                res = await session.call_tool(tool, a)
+                return not res.isError, str(res.content)[:4000]
+            except Exception as exc:
+                return False, f"error: {exc}"
+
+        outcome = await gate(Policy(), call, doc["action"], doc["target"], doc["args"], actor="owner", context={"source": "approval"}, confirmed=True)
+        approvals.finish(pid, outcome.status, outcome.text)
+        return outcome.text
 
     def discard(self, pid):
-        return self.pending.pop(pid, None) is not None
+        if self.pending.pop(pid, None) is not None:
+            return True
+        try:
+            return approvals.finish(pid, "discarded") is not None
+        except ValueError:
+            return False
 
 
 class Chat:

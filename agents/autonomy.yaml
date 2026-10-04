@@ -1,0 +1,28 @@
+# Autonomy policy. Changing this file is a protected, human-only change (agents/reviewer.py IMMUTABLE).
+#
+# mode:
+#   dry_run     mutating tools only describe what they would do
+#   supervised  every mutating action is queued for a human (Jarvis > Autonomy, plus a notification)
+#   autonomous  each action follows its own level below, inside the budgets and breaker
+mode: supervised
+
+actions:
+  vm_snapshot: { level: auto, per_target_per_hour: 2 }
+  vm_start:    { level: auto, per_target_per_hour: 3 }
+  vm_stop:     { level: approve, snapshot_first: true }
+
+budgets:
+  actions_per_day: 20
+
+# Too many failed autonomous or approved actions in the window trips the breaker: everything that was auto
+# becomes approve until a human resets it in Jarvis (or with `python agents/policy.py reset-breaker`).
+breaker:
+  failures: 3
+  window_minutes: 60
+
+approvals:
+  ttl_hours: 24
+
+# A human-approved action class with this many consecutive successes is suggested for promotion to level: auto.
+earned_autonomy:
+  promote_after: 10
