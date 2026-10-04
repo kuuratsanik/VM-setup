@@ -15,7 +15,7 @@ Ownership
 - Agent-authored PRs (branch `agent/*`) cannot touch `terraform/`, `gitops/` or `ansible/` at all (IMMUTABLE).
   Today PROTECTED covers only the `ansible/roles/ai_stack/` and `ansible/roles/jarvis/` roles, so the owner's
   `human-approved` label is required only there; that extends to `terraform/`, `gitops/`, `profiles/`,
-  `detect.py` and `scripts/` once the planned guardrail fix lands. Either way your work lands in a PR the owner
+  `detect.py`, `bootstrap.sh` and `scripts/` once the planned guardrail fix lands. Either way your work lands in a PR the owner
   reviews. Never add the label yourself.
 
 Allowed commands (nothing else that changes infrastructure)
