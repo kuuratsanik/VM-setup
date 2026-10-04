@@ -17,7 +17,7 @@ Track A comes first. It is cheap and it makes Track B safer to build.
 | GitOps | Argo CD app-of-apps per cluster (`hub`, `dev`, `prod`). Clusters pull from Git, nothing pushes to them | Works over any network that can reach GitHub. No inbound access is needed |
 | Sizing | `detect.py` reads host hardware into a `min`/`std`/`max` profile | A cloud cluster has no host to detect. It needs a declared profile |
 | Operator | `infra-mcp/` has allowlisted libvirt tools, gated by `agents/policy.py` and `autonomy.yaml` | Cloud actions need the same gate, plus a cost dimension |
-| Compute | Jarvis rents RunPod pods and runs Kaggle notebooks, with price caps, a lifetime limit and a reaper | This is the pattern to copy for cloud VMs |
+| Compute | Jarvis rents GPU pods and runs hosted notebooks (`jarvis/compute/`), with price caps, a lifetime limit and a reaper | This is the pattern to copy for cloud VMs |
 | Guardrails | `agents/reviewer.py`: agent PRs may never touch `terraform/`, `ansible/` or `gitops/` (IMMUTABLE). Human PRs under `jarvis/`, `agents/` and others need the `human-approved` label | `terraform/` and `gitops/` are **not** in `PROTECTED`, so a human-authored PR changing them merges without that label |
 | CI | `ci.yml`: `terraform validate`, ansible-lint, yamllint, py_compile, `node --check`, pytest, and `kubectl kustomize` for each cluster | There is no browser test of Jarvis and no live sync test of GitOps |
 | Cloud session | 4 vCPU, 15 GB RAM, Docker available, **no `/dev/kvm`**. terraform, kubectl, helm, ansible-lint, yamllint, k3d and kind are not installed | Libvirt VMs can never run in a cloud session. Containers can |
@@ -148,7 +148,7 @@ terraform/
 
 ### B2. State and credentials
 
-- Remote state in S3-compatible object storage with state locking (for example the S3 backend's lockfile, or the provider's native state backend if it has one) and encryption at rest. One state per env. The libvirt env can stay local if you prefer, but it gets the same backend block option.
+- Remote state in object storage with state locking and encryption at rest, using whichever Terraform backend the chosen provider supports. One state per env. The libvirt env can stay local if you prefer, but it gets the same backend block option.
 - Provider credentials live **only** on the owner's machine or in a CI environment protected by required reviewers. They never go in `secrets.env` on the host, in cloud dev sessions, or in agent reach.
 - CI gets a separate read-only, plan-only credential for a `terraform plan` job that posts the plan to the PR. `apply` stays a manual, human-run step, matching the current "Terraform is never applied by an agent" rule.
 
@@ -156,7 +156,7 @@ terraform/
 
 - Each cloud cluster gets a private network with all node-to-node traffic on private IPs. The provider firewall allows **no** inbound traffic except SSH from a bastion or the VPN, and 80/443 to ingress nodes only if prod serves traffic.
 - The Kubernetes API (6443) is never public.
-- Host to cloud: a WireGuard (or Tailscale/Headscale) tunnel from the host to a small gateway in each cloud network. This lets host Prometheus, the Operator's read-only kubeconfigs and `scripts/kubeconfig.sh` reach cloud clusters on private IPs.
+- Host to cloud: a WireGuard tunnel from the host to a small gateway in each cloud network. This lets host Prometheus, the Operator's read-only kubeconfigs and `scripts/kubeconfig.sh` reach cloud clusters on private IPs.
 - GitOps needs nothing new. Argo CD in each cluster pulls from GitHub over outbound HTTPS, which is the main reason this design ports cleanly.
 
 ### B4. Cluster bootstrap and GitOps
@@ -166,12 +166,12 @@ terraform/
 - Secrets: sealed-secrets works as is, with a separate key per cluster, backed up offline. Optionally enable `external-secrets` with the provider's secret manager for prod.
 - Backups: enable `velero` against provider object storage for cloud clusters from day one. It is still optional on the host.
 
-### B5. Cost guardrails (copy the RunPod pattern)
+### B5. Cost guardrails (copy the existing GPU-rental pattern)
 
 - Tag or label every cloud resource with `vmsetup=managed`, `env` and `owner`.
 - Set a provider budget alert at 50%, 80% and 100% of the B0 budget, sent to the same `AUTONOMY_NOTIFY_URL` the daily digest uses.
-- Extend `agents/cost.py` to read provider billing and usage. Add cloud spend next to LLM and RunPod spend in the Jarvis Overview and the daily digest.
-- Run a **reaper** on a timer, like the RunPod reaper. It lists `vmsetup=managed` servers that are not in Terraform state, or that are past a `expires=` label on temporary clusters. It **reports** them in Jarvis and never deletes on its own. Deletion is a confirmed action.
+- Extend `agents/cost.py` to read provider billing and usage. Add cloud spend next to LLM and GPU-rental spend in the Jarvis Overview and the daily digest.
+- Run a **reaper** on a timer, like the existing GPU-pod reaper (`jarvis/reaper.py`). It lists `vmsetup=managed` servers that are not in Terraform state, or that are past a `expires=` label on temporary clusters. It **reports** them in Jarvis and never deletes on its own. Deletion is a confirmed action.
 - Use no autoscaling at first. Cluster size changes only through a reviewed PR to the env's profile, then a human `apply`.
 
 ### B6. Operator, autonomy and Jarvis
