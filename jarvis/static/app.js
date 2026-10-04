@@ -12,7 +12,7 @@ const h = (tag, attrs = {}, ...kids) => {
 };
 const api = async (path, opts = {}) => {
   const res = await fetch(path, { credentials: "same-origin", ...opts, headers: { "X-Requested-With": "jarvis", ...(opts.json ? { "Content-Type": "application/json" } : {}), ...(opts.headers || {}) }, body: opts.json ? JSON.stringify(opts.json) : opts.body });
-  if (res.status === 401) { showLogin(); throw new Error("login required"); }
+  if (res.status === 401 && path !== "/api/login") { showLogin(); throw new Error("login required"); }
   if (!res.ok) { let d = res.statusText; try { d = (await res.json()).detail || d; } catch {} throw new Error(d); }
   return res;
 };

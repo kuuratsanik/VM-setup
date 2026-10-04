@@ -75,6 +75,8 @@ Accounts and sign-in: you create the accounts yourself (RunPod, Kaggle, OpenAI, 
 
 Compute: RunPod pods go through a confirmation, an hourly price cap, a maximum lifetime (default 4 h) and a reaper timer that deletes expired or untracked `jarvis-*` pods every 10 minutes. Kaggle notebooks run private with internet off and use your free weekly GPU quota. Both are tested against mocks only, not against live accounts.
 
+Try it without hardware: `python -m jarvis.demo` serves the dashboard on `127.0.0.1:8088` with sample data, a scripted model and no real actions, and prints a one-time password (in Codespaces, forward the port).
+
 Dashboard security: Argon2id password, optional TOTP, lockout after 5 failures per address, `SameSite=Strict` HttpOnly session, custom header plus Origin check on every write, strict CSP, no secrets ever returned by the API.
 
 ## Autonomy: what runs by itself and what waits for you
