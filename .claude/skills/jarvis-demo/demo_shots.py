@@ -52,8 +52,14 @@ def main():
         time.sleep(1)  # let uvicorn bind
         with sync_playwright() as p:
             browser = p.chromium.launch()
+            def on_console(m):
+                # The demo returns expected 4xx responses (e.g. GPU pods 400 "not set up"); the browser logs those
+                # as "Failed to load resource". Ignore them; every other console error is a hard failure.
+                if m.type == "error" and not m.text.startswith("Failed to load resource"):
+                    errors.append(f"console.error: {m.text}")
+
             page = browser.new_page(viewport={"width": 1280, "height": 900})
-            page.on("console", lambda m: errors.append(f"console.{m.type}: {m.text}") if m.type == "error" else None)
+            page.on("console", on_console)
             page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
             page.goto(f"http://127.0.0.1:{args.port}/")
             page.wait_for_selector("#login:not(.hidden)", timeout=15000)

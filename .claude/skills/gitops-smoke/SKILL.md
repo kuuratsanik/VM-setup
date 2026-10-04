@@ -18,3 +18,6 @@ statuses on failure. Exit 0 = healthy. Afterwards `docker system prune -f` frees
 Needs network access to the Helm chart repos and registries (see the cloud network allowlist). If `dockerd`
 cannot run in this environment, leave this check to CI. Repo URL defaults to `origin` rewritten to https;
 override with `SMOKE_REPO_URL`.
+
+The cluster name `gitops-smoke` is fixed (the permission rules allow only that name), so two concurrent runs
+on one machine conflict: the second deletes the first's cluster. Run one at a time.

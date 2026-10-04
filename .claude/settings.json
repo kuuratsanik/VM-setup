@@ -20,16 +20,16 @@
       "Bash(node --check *)",
       "Bash(terraform -chdir=terraform init -backend=false)",
       "Bash(terraform -chdir=terraform validate)",
-      "Bash(terraform -chdir=terraform fmt *)",
+      "Bash(terraform -chdir=terraform fmt -check*)",
       "Bash(terraform version)",
-      "Bash(ansible-lint *)",
+      "Bash(ansible-lint ansible/*)",
       "Bash(yamllint *)",
       "Bash(kubectl kustomize *)",
       "Bash(kubectl version --client*)",
       "Bash(helm version*)",
       "Bash(k3d version)",
-      "Bash(k3d cluster create *)",
-      "Bash(k3d cluster delete *)",
+      "Bash(k3d cluster create gitops-smoke*)",
+      "Bash(k3d cluster delete gitops-smoke)",
       "Bash(k3d cluster list*)",
       "Bash(docker info*)",
       "Bash(docker system prune *)",
@@ -38,10 +38,20 @@
       "Bash(python .claude/skills/jarvis-demo/demo_shots.py*)",
       "Bash(bash .claude/skills/gitops-smoke/smoke.sh*)",
       "Bash(git status*)",
-      "Bash(git diff*)",
-      "Bash(git log*)",
-      "Bash(git branch*)",
-      "Bash(git fetch*)"
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git branch)",
+      "Bash(git branch --list*)",
+      "Bash(git branch --show-current)",
+      "Bash(git branch -a)",
+      "Bash(git branch -r)",
+      "Bash(git fetch origin*)",
+      "Bash(git fetch --all)"
+    ],
+    "deny": [
+      "Bash(git diff --output*)",
+      "Bash(git log --output*)",
+      "Bash(git * --output*)"
     ]
   }
 }

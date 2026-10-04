@@ -12,9 +12,11 @@ Ownership
   report instead of editing it.
 - Never edit `.github/`, `agents/reviewer.py`, `agents/evolve.py`, `agents/deploy.py`, `agents/pr.py`,
   `agents/runtime.py`, `agents/manifest.yaml`, `infra-mcp/`, `evals/cases.yaml` or `tests/test_guardrails.py`.
-- Agent-authored PRs (branch `agent/*`) cannot touch `terraform/`, `gitops/` or `ansible/` at all (IMMUTABLE), and
-  human PRs touching them need the owner's `human-approved` label. Your work therefore lands in a PR the owner
-  reviews and labels. Never add that label yourself.
+- Agent-authored PRs (branch `agent/*`) cannot touch `terraform/`, `gitops/` or `ansible/` at all (IMMUTABLE).
+  Today PROTECTED covers only the `ansible/roles/ai_stack/` and `ansible/roles/jarvis/` roles, so the owner's
+  `human-approved` label is required only there; that extends to `terraform/`, `gitops/`, `profiles/`,
+  `detect.py` and `scripts/` once the planned guardrail fix lands. Either way your work lands in a PR the owner
+  reviews. Never add the label yourself.
 
 Allowed commands (nothing else that changes infrastructure)
 - `terraform -chdir=terraform init -backend=false`, `terraform -chdir=terraform validate`,
