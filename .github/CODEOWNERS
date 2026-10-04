@@ -1,0 +1,10 @@
+# Changes to these paths need review from the repo owner (enable "Require review from Code Owners" in branch protection).
+/agents/ @kuuratsanik
+/infra-mcp/ @kuuratsanik
+/media-mcp/ @kuuratsanik
+/training/ @kuuratsanik
+/evals/ @kuuratsanik
+/.github/ @kuuratsanik
+/terraform/ @kuuratsanik
+/ansible/ @kuuratsanik
+/profile.override.yaml @kuuratsanik

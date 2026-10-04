@@ -1,0 +1,56 @@
+# Read-only identity for AI tooling (Kubernetes MCP server). No secrets, no writes.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ai-readonly
+  namespace: kube-system
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ai-readonly-token
+  namespace: kube-system
+  annotations:
+    kubernetes.io/service-account.name: ai-readonly
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ai-readonly-extra
+rules:
+  - apiGroups: [""]
+    resources: [nodes, namespaces, events, persistentvolumes]
+    verbs: [get, list, watch]
+  - apiGroups: [metrics.k8s.io]
+    resources: ["*"]
+    verbs: [get, list]
+  - apiGroups: [argoproj.io, core.k8sgpt.ai, monitoring.coreos.com, wgpolicyk8s.io, kyverno.io, upgrade.cattle.io, cert-manager.io]
+    resources: ["*"]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ai-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: ServiceAccount
+    name: ai-readonly
+    namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ai-readonly-extra
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ai-readonly-extra
+subjects:
+  - kind: ServiceAccount
+    name: ai-readonly
+    namespace: kube-system

@@ -25,7 +25,7 @@ Argo CD pulls `gitops/` from Git, so push this repo to `gitops_repo_url` (public
 | 5. k3s | `ssh ops@10.10.10.10 'sudo k3s kubectl get nodes'` (cloud-init takes a few minutes; `cloud-init status --wait`) | all nodes of the cluster `Ready` |
 | 6. Argo CD | `./scripts/kubeconfig.sh && KUBECONFIG=~/.kube/hub.yaml kubectl -n argocd get applications` | `root` plus apps `Synced`/`Healthy` (CRDs may need a couple of sync retries on first boot) |
 | 7. Monitoring | `ssh -L 9090:127.0.0.1:9090 host`, open `localhost:9090/targets` | node, libvirt, vms, netdata targets `UP` |
-| 8. Operator | `curl -X POST 127.0.0.1:8085 -d '{"alerts":[{"status":"firing","labels":{"alertname":"GuestDown"}}]}'` | a new row in `/var/lib/vmsetup/incidents.jsonl` (mutating tools stay dry-run until `VMSETUP_LIVE=1`) |
+| 8. Operator | `curl -X POST 127.0.0.1:8085 -d '{"alerts":[{"status":"firing","labels":{"alertname":"GuestDown"}}]}'` | a new row in `/var/lib/vmsetup/incidents.jsonl` and, with vector memory on, in the `incidents` table (mutating tools stay dry-run until `VMSETUP_LIVE=1`) |
 
 If a node never becomes `Ready`: `sudo journalctl -u k3s -u k3s-agent` on the node, and check that `K3S_URL` points at the cluster's first server (primary servers have none, which is expected).
 
@@ -38,10 +38,37 @@ If a node never becomes `Ready`: `sudo journalctl -u k3s -u k3s-agent` on the no
 - Host CLI tools (Ansible `k8s_tools`): helm, kubectl, argocd, k9s.
 - Monitoring: host Prometheus (`127.0.0.1:9090`) scrapes the host, libvirt guests, every node VM (node-exporter on `:9100`) and Netdata. Host Netdata UI is `127.0.0.1:19999`; reach both over an SSH tunnel (`ssh -L 9090:127.0.0.1:9090 -L 19999:127.0.0.1:19999 host`). In-cluster, `hub` runs kube-prometheus-stack and Netdata (parent/child, not claimed to Netdata Cloud).
 - Also on `hub`: Loki + Alloy (logs, wired into Grafana), Kyverno audit policies. On all clusters: system-upgrade-controller with k3s `stable` channel plans (auto-upgrades servers then agents, one node at a time). Optional: Velero (set bucket and a `velero-credentials` SealedSecret first).
-- `agents/`: `runtime.py` (Operator), `capacity.py` (weekly timer, PR proposals), `upgrade.py` (weekly, PR when a newer Ubuntu LTS image exists), `cost.py` (daily, token spend vs budget), `reviewer.py` (PR gate, see `.github/workflows/agent-review.yml`). Protected paths need the `human-approved` PR label.
-- `evals/promptfooconfig.yaml`: operator quality and prompt-injection checks (`npx promptfoo eval -c evals/promptfooconfig.yaml`).
+- `agents/`: `runtime.py` (Operator, multi-MCP via `mcp_servers.yaml`), `capacity.py`, `upgrade.py`, `cost.py`, `librarian.py`, `models.py`, `evolve.py`, `deploy.py`, `reviewer.py` (PR gate). Prompts live in `agents/prompts/`, runbooks in `agents/runbooks/`.
+- `evals/cases.yaml` + `agents/evalgate.py`: tool-choice and prompt-injection cases that gate model, prompt and tuned-model changes. `evals/promptfooconfig.yaml` is an optional promptfoo version.
+- `tests/`: unit tests (`python -m pytest -q tests`), run in CI.
+- `media-mcp/`: MCP server for image, speech, transcription, vision and video through the gateway.
+- `training/`: dataset export, hybrid fine-tuning (cloud or local LoRA) and two-stage promotion.
 - Ansible creates `/etc/vmsetup/secrets.env` (gateway key generated, provider keys blank). Set `langfuse_enabled: true` in `profile.override.yaml` plus the Langfuse keys for tracing.
-- Design choices: k3s Traefik and ServiceLB are kept (no MetalLB or ingress-nginx); node OS patching uses unattended-upgrades; agent memory is a JSONL incident file (no vector database).
+- Design choices: k3s Traefik and ServiceLB are kept (no MetalLB or ingress-nginx); node OS patching uses unattended-upgrades.
+
+## AI platform
+| Capability | How |
+|---|---|
+| Models | LiteLLM gateway: `default` (local Hermes on `std`/`max`, cloud on `min`), `cloud-small`, `cloud-frontier`, optional `cloud-hermes` (OpenRouter). `agents/models.py` finds newer cloud models weekly, gates them, and opens a PR |
+| Local inference | `std`: Ollama `hermes3:8b`. `max`: vLLM `NousResearch/Hermes-4-14B-FP8` (needs NVIDIA CDI) |
+| Agent tools (MCP) | `agents/mcp_servers.yaml`: infra (dry-run), Kubernetes (read-only ServiceAccount), Prometheus, Argo CD (read-only, needs `ARGOCD_*`) |
+| In-cluster AI | k8sgpt-operator on `hub` (analysis only; the Operator reads its `Result` objects) |
+| Memory and RAG | Postgres + pgvector (`agents/memory.py`); the Operator retrieves similar past incidents. `agents/feedback.py mark <id> good|bad` steers retrieval |
+| Observability | Phoenix (`127.0.0.1:6006`, `std`/`max`), optional Langfuse cloud, promptfoo, eval gate |
+| Media | `media-mcp` tools through LiteLLM aliases `image`, `tts`, `stt` (cloud, or LocalAI on `max`); video needs a gateway/provider with the `/v1/videos` API (untested against a real provider) |
+| Training | `training/export_dataset.py` (human-approved incidents, redacted) then `training/train.py --provider openai --yes` or `--provider local --run`; `training/promote.py candidate|default` (default needs the eval gate to pass) |
+| Coding PRs | label an issue `agent-fix` (owner only) for the Claude Code action, or assign it to Copilot; `agents/evolve.py` proposes changes to prompts, runbooks and non-critical agent code |
+
+First-boot extras: after the clusters are up and `ai-readonly` has synced, run `sudo ./scripts/ai_kubeconfig.py`. Put a fine-grained `GH_TOKEN` (contents and pull requests write) in `/etc/vmsetup/secrets.env` for the PR-opening agents. Training stays off until `ai.training.enabled: true` is set in `profile.override.yaml`, and `train.py` uploads redacted data only with `--yes` and under the `max_usd` cap.
+
+## Self-improvement and its limits
+Self-healing (Operator, Argo CD `selfHeal`, systemd restarts), self-upgrading (`deploy.py` rolls out approved `main` commits with automatic rollback; Renovate; k3s system-upgrade-controller; unattended-upgrades) and self-coding (`evolve.py`, `agent-fix`) exist, but none of it is autonomous in the sense of unchecked:
+- Agents change themselves only through pull requests. Nothing merges itself, and Terraform/Ansible are never applied by an agent.
+- Agent-authored PRs (branch `agent/*`) cannot touch the files in `IMMUTABLE` in `agents/reviewer.py` (reviewer, evolve, deploy, runtime, MCP allowlist, eval cases, manifest, workflows, infrastructure code), even with the label. Other protected paths need `human-approved`.
+- `evolve.py` must pass the tests and, for prompt changes, the eval gate (including every prompt-injection case), is limited to 3 files and 200 changed lines, and runs at most once a day.
+- `deploy.py` deploys only commits from merged PRs (protected paths need the label), runs the tests first, and rolls back if the new version is unhealthy.
+- The kill switch `/etc/vmsetup/AGENTS_PAUSED` stops the Operator and Evolve. Add `agents/` to branch protection with required code-owner review (`.github/CODEOWNERS`).
+This is a bounded automation loop with human approval, not AGI.
 - `ansible/`: host hardening, AI gateway, monitoring, operator agent service.
 - `agents/manifest.yaml`: agent team, autonomy levels, guardrails.
 - `infra-mcp/`: allowlisted MCP server for the node VMs (dry-run by default, kill switch at `/etc/vmsetup/AGENTS_PAUSED`).

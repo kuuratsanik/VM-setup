@@ -11,4 +11,4 @@ python3 detect.py "$@"
 
 ansible-galaxy collection install -r ansible/requirements.yml
 ansible-playbook -i localhost, -c local ansible/site.yml \
-  -e @profile.generated.json
+  -e @profile.generated.json -e "vmsetup_repo_url=$(git remote get-url origin 2>/dev/null || true)"

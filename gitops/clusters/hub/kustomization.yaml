@@ -7,6 +7,8 @@ resources:
   - ../../apps/loki
   - ../../apps/alloy
   - ../../apps/netdata
+  - ../../apps/ai-readonly
+  - ../../apps/k8sgpt
   - ../../apps/system-upgrade-controller
 # Optional (enable per cluster by adding the line):
 #  - ../../apps/velero

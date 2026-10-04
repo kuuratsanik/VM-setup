@@ -1,0 +1,9 @@
+[Unit]
+Description=Librarian agent: backfill incident memory, export eval cases, propose runbooks
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vm-setup
+EnvironmentFile=-/etc/vmsetup/secrets.env
+ExecStart=/opt/vm-setup/.venv/bin/python /opt/vm-setup/agents/librarian.py all

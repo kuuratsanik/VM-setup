@@ -1,39 +1,152 @@
-model_list:
-  - model_name: default
-    litellm_params:
-{% if local_llm.enabled %}
-      model: ollama/{{ local_llm.model }}
-      api_base: http://127.0.0.1:11434
+{% set ai_cfg = ai | default({}) %}
+{% set media = ai_cfg.media | default({}) %}
+{% set engine = local_llm.engine | default('ollama') %}
+{% set small = llm_routing.cloud_small | default('openai/gpt-4o-mini') %}
+{% set frontier = llm_routing.cloud_frontier | default('anthropic/claude-sonnet-4-5') %}
+{% if local_llm.enabled and engine == 'vllm' %}
+{% set local_model = 'hosted_vllm/' ~ local_llm.model %}
+{% set local_base = 'http://127.0.0.1:8000/v1' %}
 {% else %}
-      model: openai/gpt-4o-mini
-      api_key: os.environ/OPENAI_API_KEY
+{% set local_model = 'ollama_chat/' ~ local_llm.model %}
+{% set local_base = 'http://127.0.0.1:11434' %}
 {% endif %}
+{% macro key_env(model) %}{{ 'ANTHROPIC_API_KEY' if model.startswith('anthropic/') else 'OPENROUTER_API_KEY' if model.startswith('openrouter/') else 'OPENAI_API_KEY' }}{% endmacro %}
+model_list:
 {% if local_llm.enabled %}
   - model_name: local
     litellm_params:
-      model: ollama/{{ local_llm.model }}
-      api_base: http://127.0.0.1:11434
+      model: {{ local_model }}
+      api_base: {{ local_base }}
+      api_key: none
 {% endif %}
   - model_name: cloud-small
     litellm_params:
-      model: openai/gpt-4o-mini
-      api_key: os.environ/OPENAI_API_KEY
+      model: {{ small }}
+      api_key: os.environ/{{ key_env(small) }}
   - model_name: cloud-frontier
     litellm_params:
-      model: anthropic/claude-sonnet-4-5
+      model: {{ frontier }}
+      api_key: os.environ/{{ key_env(frontier) }}
+{% if (ai_cfg.cloud | default({})).openrouter | default(false) %}
+  - model_name: cloud-hermes
+    litellm_params:
+      model: openrouter/nousresearch/hermes-4-405b
+      api_key: os.environ/OPENROUTER_API_KEY
+{% endif %}
+  # Wildcards let agents/evalgate.py test any provider model id (openai/<id>, anthropic/<id>) before it is adopted.
+  - model_name: "openai/*"
+    litellm_params:
+      model: "openai/*"
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: "anthropic/*"
+    litellm_params:
+      model: "anthropic/*"
       api_key: os.environ/ANTHROPIC_API_KEY
+  # default: tuned model when promoted, else the local model, else cloud-small
+  - model_name: default
+    litellm_params:
+{% if ai_cfg.tuned_model | default('') %}
+{% if ai_cfg.tuned_model.startswith('ft:') %}
+      model: openai/{{ ai_cfg.tuned_model }}
+      api_key: os.environ/OPENAI_API_KEY
+{% else %}
+      model: hosted_vllm/{{ ai_cfg.tuned_model }}
+      api_base: http://127.0.0.1:8000/v1
+      api_key: none
+{% endif %}
+{% elif local_llm.enabled %}
+      model: {{ local_model }}
+      api_base: {{ local_base }}
+      api_key: none
+{% else %}
+      model: {{ small }}
+      api_key: os.environ/{{ key_env(small) }}
+{% endif %}
+{% if ai_cfg.tuned_model | default('') %}
+  # base: the untuned model, kept as the fallback for default
+  - model_name: base
+    litellm_params:
+{% if local_llm.enabled %}
+      model: {{ local_model }}
+      api_base: {{ local_base }}
+      api_key: none
+{% else %}
+      model: {{ small }}
+      api_key: os.environ/{{ key_env(small) }}
+{% endif %}
+{% endif %}
+{% if ai_cfg.tuned_candidate | default('') %}
+  - model_name: tuned
+    litellm_params:
+{% if ai_cfg.tuned_candidate.startswith('ft:') %}
+      model: openai/{{ ai_cfg.tuned_candidate }}
+      api_key: os.environ/OPENAI_API_KEY
+{% else %}
+      model: hosted_vllm/{{ ai_cfg.tuned_candidate }}
+      api_base: http://127.0.0.1:8000/v1
+      api_key: none
+{% endif %}
+{% endif %}
+  - model_name: embed
+    litellm_params:
+{% if ai_cfg.embedding_provider | default('cloud') == 'local' %}
+      model: ollama/{{ ai_cfg.embedding_model | default('nomic-embed-text') }}
+      api_base: http://127.0.0.1:11434
+{% else %}
+      model: openai/{{ ai_cfg.embedding_model | default('text-embedding-3-small') }}
+      api_key: os.environ/OPENAI_API_KEY
+{% endif %}
+{% set kinds = {
+  'image': ['image_generation', 'gpt-image-1', media.image_model_local | default('stablediffusion')],
+  'tts': ['audio_speech', 'tts-1', media.tts_model_local | default('voice-en-us-amy-low')],
+  'stt': ['audio_transcription', 'whisper-1', media.stt_model_local | default('whisper-base')]
+} %}
+{% for kind, spec in kinds.items() %}
+  - model_name: {{ kind }}-cloud
+    litellm_params:
+      model: openai/{{ spec[1] }}
+      api_key: os.environ/OPENAI_API_KEY
+    model_info:
+      mode: {{ spec[0] }}
+{% if media.local | default(false) %}
+  - model_name: {{ kind }}-local
+    litellm_params:
+      model: openai/{{ spec[2] }}
+      api_base: http://127.0.0.1:8080/v1
+      api_key: none
+    model_info:
+      mode: {{ spec[0] }}
+{% endif %}
+  - model_name: {{ kind }}
+    litellm_params:
+{% if media.local | default(false) %}
+      model: openai/{{ spec[2] }}
+      api_base: http://127.0.0.1:8080/v1
+      api_key: none
+{% else %}
+      model: openai/{{ spec[1] }}
+      api_key: os.environ/OPENAI_API_KEY
+{% endif %}
+    model_info:
+      mode: {{ spec[0] }}
+{% endfor %}
 
 router_settings:
   fallbacks:
-{% if local_llm.enabled %}
-    - local: [cloud-small]
+{% if ai_cfg.tuned_model | default('') %}
+    - default: [base, cloud-small]
+{% elif local_llm.enabled %}
     - default: [cloud-small]
+    - local: [cloud-small]
 {% endif %}
     - cloud-small: [cloud-frontier]
 
 litellm_settings:
   max_budget: {{ llm_routing.cloud_budget_usd_month }}
   budget_duration: 30d
+{% if ai_cfg.phoenix | default(false) %}
+  callbacks: ["arize_phoenix"]
+{% endif %}
 {% if langfuse_enabled | default(false) %}
   success_callback: ["langfuse"]
   failure_callback: ["langfuse"]

@@ -1,0 +1,11 @@
+ai_stack_engine: "{{ (local_llm | default({})).get('engine', 'ollama') }}"
+ai_stack_ai: "{{ ai | default({}) }}"
+ai_stack_vector_memory: "{{ ai_stack_ai.get('vector_memory', false) }}"
+ai_stack_phoenix: "{{ ai_stack_ai.get('phoenix', false) }}"
+ai_stack_media_local: "{{ (ai_stack_ai.get('media') or {}).get('local', false) }}"
+ai_stack_embed_local: "{{ ai_stack_ai.get('embedding_provider', 'cloud') == 'local' }}"
+ai_stack_lora_path: "{{ ai_stack_ai.get('lora_adapter_path', '') }}"
+ai_stack_localai_models: "{{ (ai_stack_ai.get('media') or {}).get('local_model_ids', []) }}"
+ai_stack_ollama_models: >-
+  {{ ([local_llm.model] if local_llm.enabled and ai_stack_engine == 'ollama' else [])
+  + ([ai_stack_ai.get('embedding_model', 'nomic-embed-text')] if ai_stack_embed_local | bool else []) }}

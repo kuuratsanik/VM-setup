@@ -1,0 +1,19 @@
+# Analysis only (ai.enabled: false): results appear as Result resources the Operator reads through the Kubernetes MCP server.
+# To add LLM explanations, bind the gateway to a cluster-reachable address, add a SealedSecret with its key, and set ai.enabled.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k8sgpt
+---
+apiVersion: core.k8sgpt.ai/v1alpha1
+kind: K8sGPT
+metadata:
+  name: k8sgpt
+  namespace: k8sgpt
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  ai:
+    enabled: false
+    backend: openai
+  noCache: false

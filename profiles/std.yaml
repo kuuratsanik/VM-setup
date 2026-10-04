@@ -4,7 +4,14 @@ servers_per_cluster: 1
 workers_per_cluster: 2
 server_vcpu: 2
 server_ram_gb: 4
-local_llm: { enabled: true, model: "qwen2.5-coder:7b" }
+local_llm: { enabled: true, model: "hermes3:8b" }
+ai:
+  embedding_provider: local
+  embedding_model: nomic-embed-text
+  vector_memory: true
+  phoenix: true
+  media: { local: false }
+  training: { enabled: false, max_usd: 50 }
 llm_routing: { cloud_budget_usd_month: 50, default_tier: local-small }
 monitoring: { scrape_interval: 30s, retention_days: 15, loki: true }
 sandbox: podman
