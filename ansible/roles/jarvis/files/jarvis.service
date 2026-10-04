@@ -1,0 +1,24 @@
+[Unit]
+Description=Jarvis web dashboard (127.0.0.1:8088, reach it through an SSH tunnel or a TLS reverse proxy)
+After=network-online.target
+
+[Service]
+User=jarvis
+Group=jarvis
+WorkingDirectory=/opt/vm-setup
+EnvironmentFile=/etc/vmsetup/jarvis.env
+Environment=HOME=/var/lib/vmsetup/jarvis PYTHONPATH=/opt/vm-setup:/opt/vm-setup/agents
+ExecStart=/opt/vm-setup/.venv/bin/python -m jarvis.app
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/vmsetup/jarvis
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

@@ -43,6 +43,7 @@ If a node never becomes `Ready`: `sudo journalctl -u k3s -u k3s-agent` on the no
 - `tests/`: unit tests (`python -m pytest -q tests`), run in CI.
 - `media-mcp/`: MCP server for image, speech, transcription, vision and video through the gateway.
 - `training/`: dataset export, hybrid fine-tuning (cloud or local LoRA) and two-stage promotion.
+- `jarvis/`: the Jarvis web dashboard (see below).
 - Ansible creates `/etc/vmsetup/secrets.env` (gateway key generated, provider keys blank). Set `langfuse_enabled: true` in `profile.override.yaml` plus the Langfuse keys for tracing.
 - Design choices: k3s Traefik and ServiceLB are kept (no MetalLB or ingress-nginx); node OS patching uses unattended-upgrades.
 
@@ -60,6 +61,19 @@ If a node never becomes `Ready`: `sudo journalctl -u k3s -u k3s-agent` on the no
 | Coding PRs | label an issue `agent-fix` (owner only) for the Claude Code action, or assign it to Copilot; `agents/evolve.py` proposes changes to prompts, runbooks and non-critical agent code |
 
 First-boot extras: after the clusters are up and `ai-readonly` has synced, run `sudo ./scripts/ai_kubeconfig.py`. Put a fine-grained `GH_TOKEN` (contents and pull requests write) in `/etc/vmsetup/secrets.env` for the PR-opening agents. Training stays off until `ai.training.enabled: true` is set in `profile.override.yaml`, and `train.py` uploads redacted data only with `--yes` and under the `max_usd` cap.
+
+## Jarvis (web dashboard)
+Runs as the unprivileged `jarvis` user on `127.0.0.1:8088`; reach it with `ssh -L 8088:127.0.0.1:8088 host` or a TLS reverse proxy (then set `JARVIS_HTTPS=1` in `/etc/vmsetup/jarvis.env`).
+
+1. Create the owner account (there is no default login): `sudo -u jarvis env JARVIS_STATE_DIR=/var/lib/vmsetup/jarvis PYTHONPATH=/opt/vm-setup /opt/vm-setup/.venv/bin/python -m jarvis.manage set-password`. Optional TOTP: `enroll-totp`, then `confirm-totp CODE`.
+2. Tabs: Overview (services, nodes, spend), Chat (streaming, hybrid local/cloud models, tools, voice, image), Compute (RunPod and Kaggle), Setup (provider onboarding), Incidents.
+3. Chat tools reuse `agents/mcp_servers.yaml`. Anything that changes state (VM start/stop/snapshot, renting a GPU, running a notebook) is only proposed; you press Confirm. Infra actions stay dry-run until `VMSETUP_LIVE=1`.
+
+Accounts and sign-in: you create the accounts yourself (RunPod, Kaggle, OpenAI, Anthropic, OpenRouter, Hugging Face, GitHub). Jarvis does not automate registration, CAPTCHA, or email/phone verification, which provider terms generally forbid. The Setup tab opens each sign-up and token page, lists the steps, checks the pasted token with a harmless read-only call, and hands it to a root helper (`jarvis/apply_secrets.py`, allowlisted names and strict value patterns only) that writes it to `/etc/vmsetup` and restarts the consumers. Chat refuses messages that look like keys.
+
+Compute: RunPod pods go through a confirmation, an hourly price cap, a maximum lifetime (default 4 h) and a reaper timer that deletes expired or untracked `jarvis-*` pods every 10 minutes. Kaggle notebooks run private with internet off and use your free weekly GPU quota. Both are tested against mocks only, not against live accounts.
+
+Dashboard security: Argon2id password, optional TOTP, lockout after 5 failures per address, `SameSite=Strict` HttpOnly session, custom header plus Origin check on every write, strict CSP, no secrets ever returned by the API.
 
 ## Self-improvement and its limits
 Self-healing (Operator, Argo CD `selfHeal`, systemd restarts), self-upgrading (`deploy.py` rolls out approved `main` commits with automatic rollback; Renovate; k3s system-upgrade-controller; unattended-upgrades) and self-coding (`evolve.py`, `agent-fix`) exist, but none of it is autonomous in the sense of unchecked:

@@ -6,12 +6,12 @@ import subprocess
 import sys
 
 # Changes here need the 'human-approved' label.
-PROTECTED = ("agents/", "infra-mcp/", "media-mcp/", "training/", "evals/", ".github/", "ansible/roles/ai_stack/", "profile.override.yaml")
+PROTECTED = ("agents/", "jarvis/", "infra-mcp/", "media-mcp/", "training/", "evals/", ".github/", "ansible/roles/ai_stack/", "ansible/roles/jarvis/", "profile.override.yaml")
 # Safety-critical files: agent-authored PRs (branch agent/*) may never touch these, label or not.
 IMMUTABLE = (
     "agents/reviewer.py", "agents/evolve.py", "agents/deploy.py", "agents/pr.py", "agents/runtime.py", "agents/redact.py",
     "agents/manifest.yaml", "agents/mcp_servers.yaml", "agents/evalgate.py", "infra-mcp/", "evals/cases.yaml", ".github/", "ansible/", "terraform/",
-    "gitops/", "training/", "media-mcp/", "profile.override.yaml", "tests/test_guardrails.py",
+    "gitops/", "training/", "media-mcp/", "jarvis/", "profile.override.yaml", "tests/test_guardrails.py",
 )
 SECRET_RE = re.compile(r"(sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[A-Za-z0-9]{30,})")
 

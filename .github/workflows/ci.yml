@@ -14,6 +14,7 @@ jobs:
       - run: ansible-galaxy collection install -r ansible/requirements.yml
       - run: ansible-lint ansible/
       - run: yamllint -d relaxed profiles agents
-      - run: python -m py_compile detect.py agents/*.py infra-mcp/server.py media-mcp/server.py training/*.py scripts/*.py
-      - run: pip install -r agents/requirements.txt pytest && python -m pytest -q tests
+      - run: python -m py_compile detect.py agents/*.py infra-mcp/server.py media-mcp/server.py training/*.py scripts/*.py jarvis/*.py jarvis/compute/*.py
+      - run: node --check jarvis/static/app.js
+      - run: pip install -r agents/requirements.txt -r jarvis/requirements.txt pytest pytest-asyncio && python -m pytest -q tests
       - run: for c in hub dev prod; do kubectl kustomize gitops/clusters/$c > /dev/null; done

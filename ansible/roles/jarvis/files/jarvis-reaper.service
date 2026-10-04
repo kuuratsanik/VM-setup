@@ -1,0 +1,10 @@
+[Unit]
+Description=Terminate expired Jarvis RunPod pods
+
+[Service]
+Type=oneshot
+User=jarvis
+WorkingDirectory=/opt/vm-setup
+EnvironmentFile=/etc/vmsetup/jarvis.env
+Environment=PYTHONPATH=/opt/vm-setup
+ExecStart=/opt/vm-setup/.venv/bin/python -m jarvis.reaper

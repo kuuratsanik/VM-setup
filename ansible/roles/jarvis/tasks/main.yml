@@ -1,0 +1,67 @@
+- name: Create the jarvis service user
+  ansible.builtin.user:
+    name: jarvis
+    system: true
+    shell: /usr/sbin/nologin
+    home: /var/lib/vmsetup/jarvis
+    create_home: false
+    groups: [libvirt]
+    append: true
+
+- name: Create Jarvis state directory
+  ansible.builtin.file:
+    path: /var/lib/vmsetup/jarvis
+    state: directory
+    owner: jarvis
+    group: jarvis
+    mode: "0750"
+
+- name: Read the gateway key from the existing secrets file
+  ansible.builtin.slurp:
+    src: /etc/vmsetup/secrets.env
+  register: jarvis_secrets_file
+  no_log: true
+
+- name: Pick the gateway key and a session secret
+  ansible.builtin.set_fact:
+    jarvis_litellm_key: "{{ jarvis_secrets_file.content | b64decode | regex_search('(?m)^LITELLM_KEY=(.+)$', '\\1') | first }}"
+    jarvis_session_secret: "{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits length=64') }}"
+  no_log: true
+
+- name: Create the Jarvis environment file (never overwritten)
+  ansible.builtin.template:
+    src: jarvis.env.j2
+    dest: /etc/vmsetup/jarvis.env
+    owner: root
+    group: jarvis
+    mode: "0640"
+    force: false
+  no_log: true
+
+- name: Install Jarvis dependencies
+  ansible.builtin.pip:
+    requirements: /opt/vm-setup/jarvis/requirements.txt
+    virtualenv: /opt/vm-setup/.venv
+
+- name: Install Jarvis units
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop:
+    - jarvis.service
+    - vmsetup-secrets.path
+    - vmsetup-secrets.service
+    - jarvis-reaper.service
+    - jarvis-reaper.timer
+
+- name: Enable Jarvis, the secrets applier and the pod reaper
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop:
+    - jarvis.service
+    - vmsetup-secrets.path
+    - jarvis-reaper.timer
