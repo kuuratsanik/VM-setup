@@ -1,11 +1,8 @@
-# Cloud plan: developing in the cloud and running in the cloud
+# Future: running the platform on a cloud provider
 
-This plan covers two related tracks:
+> **Status: future option, not current work.** The current cloud work is developing this repo in Claude Code cloud sessions; see [`cloud-dev-plan.md`](cloud-dev-plan.md). This document is kept so the platform-in-the-cloud design, which has already been reviewed against the repo, isn't lost.
 
-- **Track A, cloud development.** Work on this repo in Claude Code cloud sessions, using the frontend/backend/adversary agent team, with checks that match CI.
-- **Track B, the platform in the cloud.** Let vm-setup create k3s clusters on a cloud provider alongside the existing KVM/libvirt fleet. Keep the same GitOps, monitoring, AI operator and guardrails.
-
-Track A comes first. It is cheap and it makes Track B safer to build.
+It covers letting vm-setup create k3s clusters on a cloud provider (Hetzner Cloud is the candidate for later) alongside the existing KVM/libvirt fleet, keeping the same GitOps, monitoring, AI operator and guardrails.
 
 ## 1. Starting point (as of `main` @ a8bb19c)
 
@@ -20,114 +17,17 @@ Track A comes first. It is cheap and it makes Track B safer to build.
 | Compute | Jarvis rents GPU pods and runs hosted notebooks (`jarvis/compute/`), with price caps, a lifetime limit and a reaper | This is the pattern to copy for cloud VMs |
 | Guardrails | `agents/reviewer.py`: agent PRs may never touch `terraform/`, `ansible/` or `gitops/` (IMMUTABLE). Human PRs under `jarvis/`, `agents/` and others need the `human-approved` label | `PROTECTED` leaves most infra paths open for human PRs: `terraform/`, `gitops/`, `profiles/`, `detect.py`, `bootstrap.sh`, `scripts/`, and every Ansible role except `ai_stack` and `jarvis`. `.github/CODEOWNERS` lists neither `terraform/` nor `gitops/` |
 | CI | `ci.yml`: `terraform validate`, ansible-lint, yamllint, py_compile, `node --check`, pytest, and `kubectl kustomize` for each cluster | There is no browser test of Jarvis and no live sync test of GitOps |
-| Cloud session | 4 vCPU, 15 GB RAM, **no `/dev/kvm`**. The Docker CLI is installed but **no daemon runs** at session start, and there is no systemd. Playwright's Chromium is preinstalled under `/opt/pw-browsers`, but the Python `playwright` package is not. terraform, kubectl, helm, ansible-lint, yamllint, k3d and kind are not installed | Libvirt VMs can never run in a cloud session. Containers can, but only if the setup script starts `dockerd` and the environment permits it. Verify that once before relying on it |
+| Cloud dev session | 4 vCPU, 15 GB RAM, **no `/dev/kvm`**. The Docker CLI is installed but **no daemon runs** at session start, and there is no systemd. Playwright's Chromium is preinstalled under `/opt/pw-browsers`, but the Python `playwright` package is not. terraform, kubectl, helm, ansible-lint, yamllint, k3d and kind are not installed | Libvirt VMs can never run in a cloud session. Containers can, but only if the setup script starts `dockerd` and the environment permits it. Verify that once before relying on it |
 
 ---
 
-## Track A: developing in the cloud
-
-### A1. Environment (one-time setup in the cloud environment settings)
-
-**Setup script.** Add this in the environment's settings under *Setup script*. It runs when a new session starts.
-
-```bash
-set -euo pipefail
-# Python deps used by CI
-pip install -q -r agents/requirements.txt -r jarvis/requirements.txt pytest pytest-asyncio ansible-lint yamllint
-ansible-galaxy collection install -r ansible/requirements.yml || echo "WARN: ansible-galaxy failed (check network allowlist)"
-# Browser tests: the Chromium build is preinstalled (PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers); install only the
-# Python package, pinned to the version that matches that build, and never download browsers.
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 pip install -q "playwright==<version matching /opt/pw-browsers>"
-# Pinned CLI tools (bump in one place; Renovate can track these later)
-TF=1.10.5; KUBECTL=v1.31.4; HELM=v3.16.3; K3D=v5.7.4   # Terraform >= 1.10 for native state lockfiles
-curl -fsSL https://releases.hashicorp.com/terraform/$TF/terraform_${TF}_linux_amd64.zip -o /tmp/tf.zip && unzip -oq /tmp/tf.zip terraform -d /tmp && mv /tmp/terraform /usr/local/bin/
-curl -fsSL https://dl.k8s.io/release/$KUBECTL/bin/linux/amd64/kubectl -o /usr/local/bin/kubectl && chmod +x /usr/local/bin/kubectl
-curl -fsSL https://get.helm.sh/helm-$HELM-linux-amd64.tar.gz | tar -xz -C /tmp && mv /tmp/linux-amd64/helm /usr/local/bin/
-curl -fsSL https://github.com/k3d-io/k3d/releases/download/$K3D/k3d-linux-amd64 -o /usr/local/bin/k3d && chmod +x /usr/local/bin/k3d
-# k3d needs a Docker daemon; none runs at session start. Start one in the background if the environment allows it.
-if ! docker info >/dev/null 2>&1; then (dockerd >/tmp/dockerd.log 2>&1 &) ; sleep 5; docker info >/dev/null 2>&1 || echo "WARN: no Docker daemon; gitops-smoke runs in CI only"; fi
-```
-
-The versions above are examples. Pin the ones CI uses. Before promising the GitOps smoke test in cloud sessions, check once that `dockerd` actually starts in this environment. If it doesn't, keep that test CI-only.
-
-**Network access.** Use *Custom*, keep the default package-manager list, and add:
-- `releases.hashicorp.com`, `registry.terraform.io`
-- `dl.k8s.io` and `cdn.dl.k8s.io` (it redirects there), `get.helm.sh`
-- `github.com`, `objects.githubusercontent.com`
-- `galaxy.ansible.com`, plus the download host it redirects to (check with `curl -sIL`)
-- The Helm chart repos used in `gitops/apps/*` (from `grep -rh "repoURL" gitops/apps | sort -u`; re-run that when apps are added):
-  - `argoproj.github.io`, `bitnami.github.io`, `charts.external-secrets.io`, `charts.jetstack.io`
-  - `charts.k8sgpt.ai`, `charts.longhorn.io`, `cloudnative-pg.github.io`, `grafana.github.io`
-  - `kyverno.github.io`, `netdata.github.io`, `prometheus-community.github.io`, `vmware-tanzu.github.io`
-- For the k3d smoke test (container images): `ghcr.io`, `registry-1.docker.io` and its blob CDN, `quay.io`, `registry.k8s.io`. Registries redirect blob downloads to CDN hosts, so run one image pull and allow the hosts it reports.
-
-**Secrets.** No provider keys and no real `secrets.env` in cloud sessions. The only credential worth adding is a read-only one, such as a GitHub token with read-only scope if the agents need to read Actions logs. Cloud provider credentials stay out of dev sessions entirely (see B6).
-
-**SessionStart hook** (`.claude/settings.json`). This is an idempotent check that the tools above are present. It prints a one-line warning if they aren't, so a failed setup script is noticed in the first minute, not after an hour of work.
-
-### A2. What runs where
-
-| Check | Cloud session | CI | Real host |
-|---|---|---|---|
-| Python unit tests, `node --check`, py_compile | ✅ | ✅ | ✅ |
-| `terraform validate` / `fmt`, ansible-lint, yamllint, kustomize | ✅ (after A1) | ✅ | ✅ |
-| Jarvis UI in a real browser (`python -m jarvis.demo` + Playwright, using the preinstalled Chromium) | ✅ **new** (after A1) | ✅ **new** | n/a |
-| GitOps sync smoke test (k3d cluster in Docker, apply Argo CD bootstrap, wait for `Healthy`) | ⚠️ **new**, only if `dockerd` starts (A1). Slow, about 10 min | ✅ **new**, nightly or label-triggered | n/a |
-| `terraform plan`/`apply` against libvirt | ❌ (no KVM) | ❌ | ✅ human only |
-| `terraform plan` against a cloud provider (Track B) | ⚠️ only with a plan-only credential, never in agent sessions | ✅ plan-only job | ✅ |
-| `bootstrap.sh`, Ansible against the host | ❌ | lint only | ✅ human only |
-
-The README already says the GitOps tree was verified on k3s in Docker. A2 turns that one-off check into a repeatable test.
-
-### A3. Agent team in cloud sessions
-
-The `frontend`, `backend` and `adversary` agents in `.claude/agents/` (added in the agent-definitions PR) cover Jarvis only. Extend the team rather than widen it:
-
-| Agent | Model | Owns | Notes |
-|---|---|---|---|
-| `frontend` | Sonnet | `jarvis/static/` | add a Playwright smoke test to its definition of done (A2) |
-| `backend` | Sonnet | `jarvis/*.py`, `jarvis/compute/`, `tests/test_jarvis_*` | unchanged |
-| `infra` **(new)** | Sonnet | `terraform/` (including `terraform/cloud-init.yaml.tftpl`), `profiles/`, `detect.py`, `gitops/` | may run only `validate`, `fmt`, `kustomize` and the k3d smoke test. Never `plan`/`apply` against real providers |
-| `adversary` | Fable | read-only | add infra checks: public exposure, missing state locking, unbounded cost, secrets in tfvars or cloud-init |
-
-Working loop, the same one used for the Jarvis audit fixes:
-1. The lead turns a request into scoped tasks, one owner per file set.
-2. Workers implement and run the checks for their area, without committing.
-3. The adversary reviews each diff and gives a verdict.
-4. Workers fix the findings, then the adversary re-reviews.
-5. The lead commits, pushes and opens a draft PR.
-
-Protected paths still need the owner's `human-approved` label, and nothing in this plan changes that.
-
-Add a short `CLAUDE.md` at the repo root that captures the conventions every session should know:
-- the ownership table
-- the protected and immutable paths
-- "never apply Terraform or Ansible"
-- the `human-approved` label
-- running the tests before reporting
-- keeping fake key strings in tests split, so the PR secret scan stays clean
-
-### A4. CI additions
-
-1. **`jarvis-e2e` job.** Start `python -m jarvis.demo`, then use Playwright to log in, open every tab, send a chat, and confirm and discard a pending card. Assert that there are no console errors. This closes the "not tested in a browser" gap left by the Jarvis audit fixes.
-2. **`gitops-smoke` job** (nightly, plus the `gitops` label). Create a k3d cluster, apply the cloud-init Argo CD manifests, and wait for `root` and its apps to be `Synced`/`Healthy`. The `root` Application pulls from GitHub, so set `targetRevision` to the PR head SHA (`github.sha`). In a cloud session, push the branch first.
-3. **`terraform fmt -check`** next to the existing `validate`, for every root and module (B1).
-4. **Guardrail fix.** Add `terraform/`, `gitops/`, `ansible/` (all roles and `site.yml`), `profiles/`, `detect.py`, `bootstrap.sh` and `scripts/` to `PROTECTED` in `agents/reviewer.py`, so human PRs touching infra also need `human-approved`. Add `terraform/` and `gitops/` to `.github/CODEOWNERS`, and update `tests/test_guardrails.py`. This change is itself a protected-path PR.
-
-**Exit criteria for Track A**
-- A fresh cloud session runs `pytest`, `terraform validate`, ansible-lint, yamllint, kustomize and the Jarvis e2e test with no manual installs.
-- CI runs `jarvis-e2e` on every PR, and `gitops-smoke` nightly.
-- `CLAUDE.md` and the four agent definitions are merged.
-
 ---
-
-## Track B: the platform in the cloud
 
 ### B0. Decisions needed before building (owner)
 
 | Decision | Options | Recommendation |
 |---|---|---|
-| Provider | Owner's choice. This plan names no vendor | Choose a provider that has a maintained Terraform provider, private networks, a firewall API, object storage for state and backups, and a CSI driver. A budget/alert API is a plus (see B5). The module interface stays provider-neutral, so adding a provider later is one more module |
+| Provider | Hetzner Cloud is the candidate for later; final choice is the owner's | Whichever is chosen must have a maintained Terraform provider, private networks, a firewall API, object storage for state and backups, and a CSI driver. A budget/alert API is a plus (see B5). The module interface stays provider-neutral, so adding a provider later is one more module |
 | Topology | (a) cloud-only replaces the host; (b) hybrid: host keeps `hub`, cloud runs `dev`/`prod`; (c) cloud burst for temporary clusters | **(b) hybrid.** `hub` with the AI stack and Jarvis stays on the host where local models live, and the cloud runs workload clusters |
 | Node OS | Ubuntu LTS cloud image (same as today) | Keep it, so the same cloud-init works |
 | Kubernetes | k3s on VMs (same as today) vs. the provider's managed Kubernetes | **k3s on VMs.** It keeps the GitOps tree, the upgrade controller and the operator tools identical. Managed Kubernetes can be a later module |
@@ -196,7 +96,7 @@ terraform/
   2. be added to `MUTATING` in `agents/runtime.py`, which both the Operator and Jarvis chat use to decide what needs confirmation;
   3. be added to the `infra` allow-regex in `agents/mcp_servers.yaml`;
   4. get an entry in `autonomy.yaml`, because the policy denies unknown actions;
-  5. take its target in a `domain`-equivalent argument, because `gate` derives the per-target limit from `args["domain"]`.
+  5. name its target argument exactly `domain`, because `gate` reads `args["domain"]` literally (`agents/runtime.py`, `jarvis/chat.py`). Any other name means changing both files.
 
   Add a guardrail test asserting that every infra-mcp tool with a `dry_run` parameter is in `MUTATING`. All these files are IMMUTABLE, so this is a human-authored PR with `human-approved`.
 - No cloud tool creates or destroys servers. Creation and destruction stay in Terraform.
@@ -215,28 +115,23 @@ terraform/
 - Kyverno policies from `hub` also apply to cloud clusters, in audit mode first and then enforce mode for prod.
 - Keep unattended-upgrades and the system-upgrade-controller as they are.
 - cloud-init user-data carries `K3S_TOKEN` and the Argo CD bootstrap in plaintext, and the provider's metadata endpoint (usually `169.254.169.254`) serves user-data to any process on the node. Block pod access to the metadata endpoint with a network policy or a Kyverno policy. Rotate the join token after the cluster is formed (`k3s token rotate`).
-- The adversary agent's infra review (A3) checks every Track B PR for public exposure, missing locking or encryption, credentials in tfvars or cloud-init, and unbounded `count`/`for_each`.
+- The adversary agent's infra review (see the dev plan's agent team) checks every PR for this work for public exposure, missing locking or encryption, credentials in tfvars or cloud-init, and unbounded `count`/`for_each`.
 
 ---
 
 ## 2. Roadmap
 
-Each phase ends in a merged PR (or a few), green CI and the adversary's approval. Applies are done by the owner.
+Each phase ends in merged PRs, green CI and the adversary's approval. Applies are done by the owner. Start only after the development plan's phases are done.
 
 | Phase | Scope | Exit criteria | Size |
 |---|---|---|---|
 | **0. Decide** | B0 decisions, budget number | Decisions recorded in this file | owner, ~1 h |
-| **1. Cloud dev env** | A1 setup script, network allowlist, SessionStart hook, `CLAUDE.md` | A fresh session runs every CI check locally with no installs | S |
-| **2. CI parity** | A4: `jarvis-e2e`, `terraform fmt`, guardrail fix to `PROTECTED` | Jarvis e2e is green on PRs. Infra PRs need `human-approved` | S–M |
-| **3. GitOps smoke** | A4: k3d `gitops-smoke` job | Nightly job green for `hub`/`dev`/`prod` trees | M |
-| **4. Terraform refactor** | B1 modules plus `moved` blocks, no new provider yet | `terraform plan` on the existing host shows **0 changes** | M |
-| **5. State and creds** | B2 remote state, plan-only CI job | PRs touching `terraform/` get a posted plan. State is locked and encrypted | S–M |
-| **6. First cloud cluster (dev)** | `cluster-<provider>`, `envs/cloud-dev`, B3 tunnel, B4 bootstrap | `cloud-dev` nodes `Ready`, Argo CD `Healthy`, reachable from the host over the tunnel only | M–L |
-| **7. Ops wiring** | B5 cost and reaper (report-only), B7 scraping and alerts, Jarvis Overview | Spend and nodes visible in Jarvis. Budget and orphan alerts fire in a test | M |
-| **8. Operator tools** | B6 read-only cloud tools, then mutating tools at `approve` | Tools pass the eval gate. Mutating actions queue in Jarvis and run once on confirm | M |
-| **9. Prod in cloud** | `envs/cloud-prod`, Velero, Kyverno enforce, ingress if needed | Restore drill from a Velero backup succeeds. Prod runs for 2 weeks on budget | L |
-
-Phases 1–3 need nothing from the cloud provider, so they can start immediately.
+| **1. Terraform refactor** | B1 modules plus `moved` blocks, no new provider yet | `terraform plan` on the existing host shows **0 changes** | M |
+| **2. State and creds** | B2 remote state, plan-only CI job | PRs touching `terraform/` get a posted plan. State is locked and encrypted | S–M |
+| **3. First cloud cluster (dev)** | `cluster-<provider>`, `envs/cloud-dev`, B3 tunnel, B4 bootstrap | `cloud-dev` nodes `Ready`, Argo CD `Healthy`, reachable from the host over the tunnel only | M–L |
+| **4. Ops wiring** | B5 cost and reaper (report-only), B7 scraping and alerts, Jarvis Overview | Spend and nodes visible in Jarvis. Budget and orphan alerts fire in a test | M |
+| **5. Operator tools** | B6 read-only cloud tools, then mutating tools at `approve` | Tools pass the eval gate. Mutating actions queue in Jarvis and run once on confirm | M |
+| **6. Prod in cloud** | `envs/cloud-prod`, Velero, Kyverno enforce, ingress if needed | Restore drill from a Velero backup succeeds. Prod runs for 2 weeks on budget | L |
 
 ## 3. Risks and mitigations
 
@@ -244,14 +139,14 @@ Phases 1–3 need nothing from the cloud provider, so they can start immediately
 |---|---|
 | Surprise cloud bill | Hard budget alerts (B5), no autoscaling, reaper reports, sizes only through a reviewed PR, a human-only `apply` |
 | Credential leak | Provider credentials only on the owner's machine or in a protected CI environment, plan-only token in PRs, nothing in agent reach, the PR secret scan stays on |
-| Refactor breaks the existing host | Phase 4 is gated on a zero-change `plan`, using `moved {}` blocks |
+| Refactor breaks the existing host | Phase 1 is gated on a zero-change `plan`, using `moved {}` blocks |
 | Tunnel outage blinds monitoring | Alloy remote-write as a fallback, plus a "tunnel down" alert. GitOps keeps working without the tunnel |
 | Agents gaining infra reach | `terraform/`, `ansible/` and `gitops/` stay IMMUTABLE for agent branches. Cloud tools are `approve` and cannot create or destroy |
 | Cloud sessions can't test libvirt | Accepted. The libvirt path is covered by `validate`, the zero-change plan on the host, and the host first-boot checklist |
 
 ## 4. Open questions for the owner
 
-1. Provider: which one? It must meet the B0 requirements.
+1. Provider: confirm Hetzner Cloud when this starts, against the B0 requirements.
 2. Topology: is hybrid (host `hub` plus cloud `dev`/`prod`) right, or should the host be retired eventually?
 3. Monthly cloud budget, and who gets budget alerts?
 4. Should prod in the cloud serve public traffic (ingress, DNS, TLS through cert-manager), or stay private behind the VPN?
