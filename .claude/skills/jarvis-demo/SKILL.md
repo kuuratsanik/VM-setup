@@ -12,6 +12,6 @@ console errors, 1 if there were, 2 if the `playwright` Python module is missing.
 If it is missing, install it with the pinned version from the environment setup script (Chromium is already
 preinstalled under `PLAYWRIGHT_BROWSERS_PATH`, so skip the download):
 
-    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 pip install -q "playwright==<PINNED_VERSION>"
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 pip install -q "playwright==1.56.0"
 
 Report the screenshot paths and any console errors. Screenshots come from sample data only (no secrets).

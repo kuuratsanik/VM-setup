@@ -16,7 +16,7 @@ try:
     from playwright.sync_api import sync_playwright
 except ImportError:
     print("playwright python module not installed. Install the pinned version (Chromium is preinstalled):\n"
-          '  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 pip install -q "playwright==<PINNED_VERSION>"\n'
+          '  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 pip install -q "playwright==1.56.0"\n'
           "(the pin is in the cloud environment setup script)", file=sys.stderr)
     sys.exit(2)
 
