@@ -121,10 +121,10 @@ Add a short `CLAUDE.md` at the repo root that captures the conventions every ses
 
 | Decision | Options | Recommendation |
 |---|---|---|
-| Provider | Hetzner Cloud (cheapest, simple, EU), AWS/GCP/Azure (managed everything, pricier), DigitalOcean/Linode | **Hetzner** for the first cloud cluster. It has a simple Terraform provider, private networks and low cost. Keep the module interface provider-neutral so a second provider is one more module |
+| Provider | Owner's choice. This plan names no vendor | Choose a provider that has a maintained Terraform provider, private networks, a firewall API, object storage for state and backups, a CSI driver and a budget/alert API. The module interface stays provider-neutral, so adding a provider later is one more module |
 | Topology | (a) cloud-only replaces the host; (b) hybrid: host keeps `hub`, cloud runs `dev`/`prod`; (c) cloud burst for temporary clusters | **(b) hybrid.** `hub` with the AI stack and Jarvis stays on the host where local models live, and the cloud runs workload clusters |
 | Node OS | Ubuntu LTS cloud image (same as today) | Keep it, so the same cloud-init works |
-| Kubernetes | k3s on VMs (same as today) vs. managed (EKS/GKE/AKS) | **k3s on VMs.** It keeps the GitOps tree, the upgrade controller and the operator tools identical. Managed Kubernetes can be a later module |
+| Kubernetes | k3s on VMs (same as today) vs. the provider's managed Kubernetes | **k3s on VMs.** It keeps the GitOps tree, the upgrade controller and the operator tools identical. Managed Kubernetes can be a later module |
 | Monthly cloud budget | | Set a hard number up front, used by B5 |
 
 ### B1. Restructure Terraform into modules
@@ -134,11 +134,11 @@ terraform/
   modules/
     cloud-init/        # renders cloud-init.yaml.tftpl (shared by every target)
     cluster-libvirt/   # today's network + volumes + domains
-    cluster-hcloud/    # network, firewall, placement group, servers
+    cluster-<provider>/ # network, firewall, servers for the chosen provider
   envs/
     host/              # libvirt root (what `terraform/` is today)
-    cloud-dev/         # hcloud root for the dev cluster
-    cloud-prod/        # hcloud root for the prod cluster
+    cloud-dev/         # cloud root for the dev cluster
+    cloud-prod/        # cloud root for the prod cluster
 ```
 
 - Module interface, the same for every provider. Inputs: `cluster`, `nodes` (name, role, primary, ha, size), `ssh_public_key`, `gitops_repo_url`, `gitops_revision`, `k3s_token`, `network_cidr`. Outputs: node private IPs and the primary server's private IP.
@@ -148,7 +148,7 @@ terraform/
 
 ### B2. State and credentials
 
-- Remote state in S3-compatible object storage with state locking (S3 backend with lockfile, or Terraform Cloud) and encryption at rest. One state per env. The libvirt env can stay local if you prefer, but it gets the same backend block option.
+- Remote state in S3-compatible object storage with state locking (for example the S3 backend's lockfile, or the provider's native state backend if it has one) and encryption at rest. One state per env. The libvirt env can stay local if you prefer, but it gets the same backend block option.
 - Provider credentials live **only** on the owner's machine or in a CI environment protected by required reviewers. They never go in `secrets.env` on the host, in cloud dev sessions, or in agent reach.
 - CI gets a separate read-only, plan-only credential for a `terraform plan` job that posts the plan to the PR. `apply` stays a manual, human-run step, matching the current "Terraform is never applied by an agent" rule.
 
@@ -162,7 +162,7 @@ terraform/
 ### B4. Cluster bootstrap and GitOps
 
 - Reuse `cloud-init.yaml.tftpl` unchanged, with only three new inputs: an MTU suitable for the provider network, `--node-ip` and `--flannel-iface` set to the private interface, and an optional provider CCM manifest so `LoadBalancer` Services and node addresses work. Leave ServiceLB on until a cloud load balancer is chosen.
-- Add `gitops/clusters/cloud-dev` and `cloud-prod`, or reuse `dev`/`prod` with an overlay. They hold the same base apps, plus a CSI driver from the provider (for example `hcloud-csi`) in place of `longhorn`.
+- Add `gitops/clusters/cloud-dev` and `cloud-prod`, or reuse `dev`/`prod` with an overlay. They hold the same base apps, plus the provider's CSI driver in place of `longhorn`.
 - Secrets: sealed-secrets works as is, with a separate key per cluster, backed up offline. Optionally enable `external-secrets` with the provider's secret manager for prod.
 - Backups: enable `velero` against provider object storage for cloud clusters from day one. It is still optional on the host.
 
@@ -211,7 +211,7 @@ Each phase ends in a merged PR (or a few), green CI and the adversary's approval
 | **3. GitOps smoke** | A4: k3d `gitops-smoke` job | Nightly job green for `hub`/`dev`/`prod` trees | M |
 | **4. Terraform refactor** | B1 modules plus `moved` blocks, no new provider yet | `terraform plan` on the existing host shows **0 changes** | M |
 | **5. State and creds** | B2 remote state, plan-only CI job | PRs touching `terraform/` get a posted plan. State is locked and encrypted | S–M |
-| **6. First cloud cluster (dev)** | `cluster-hcloud`, `envs/cloud-dev`, B3 tunnel, B4 bootstrap | `cloud-dev` nodes `Ready`, Argo CD `Healthy`, reachable from the host over the tunnel only | M–L |
+| **6. First cloud cluster (dev)** | `cluster-<provider>`, `envs/cloud-dev`, B3 tunnel, B4 bootstrap | `cloud-dev` nodes `Ready`, Argo CD `Healthy`, reachable from the host over the tunnel only | M–L |
 | **7. Ops wiring** | B5 cost and reaper (report-only), B7 scraping and alerts, Jarvis Overview | Spend and nodes visible in Jarvis. Budget and orphan alerts fire in a test | M |
 | **8. Operator tools** | B6 read-only cloud tools, then mutating tools at `approve` | Tools pass the eval gate. Mutating actions queue in Jarvis and run once on confirm | M |
 | **9. Prod in cloud** | `envs/cloud-prod`, Velero, Kyverno enforce, ingress if needed | Restore drill from a Velero backup succeeds. Prod runs for 2 weeks on budget | L |
@@ -231,7 +231,7 @@ Phases 1–3 need nothing from the cloud provider, so they can start immediately
 
 ## 4. Open questions for the owner
 
-1. Provider: Hetzner first, or a specific hyperscaler?
+1. Provider: which one? It must meet the B0 requirements.
 2. Topology: is hybrid (host `hub` plus cloud `dev`/`prod`) right, or should the host be retired eventually?
 3. Monthly cloud budget, and who gets budget alerts?
 4. Should prod in the cloud serve public traffic (ingress, DNS, TLS through cert-manager), or stay private behind the VPN?
