@@ -1,0 +1,7 @@
+[Unit]
+Description=Cost agent: LLM spend report
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vm-setup
+ExecStart=/opt/vm-setup/.venv/bin/python /opt/vm-setup/agents/cost.py

@@ -1,0 +1,20 @@
+groups:
+  - name: host
+    rules:
+      - alert: HostMemoryPressure
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.10
+        for: 10m
+      - alert: HostCpuSteal
+        expr: avg(rate(node_cpu_seconds_total{mode="steal"}[5m])) > 0.2
+        for: 15m
+      - alert: DiskAlmostFull
+        expr: node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} < 0.20
+        for: 10m
+  - name: guests
+    rules:
+      - alert: GuestDown
+        expr: libvirt_domain_info_state != 1
+        for: 2m
+      - alert: NodeDown
+        expr: up{job="vms"} == 0
+        for: 5m

@@ -1,0 +1,8 @@
+alert: GuestDown
+description: A libvirt guest is not running.
+steps:
+  - tool: vm_list
+  - tool: vm_snapshot   # snapshot before touching a failed guest
+  - tool: vm_start
+verify: vm_list shows the guest as running
+escalate_if: guest stops again within 10 minutes

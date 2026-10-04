@@ -1,0 +1,90 @@
+- name: Create monitoring directory
+  ansible.builtin.file:
+    path: /etc/vmsetup/monitoring
+    state: directory
+    mode: "0750"
+
+- name: Render monitoring configs
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/vmsetup/monitoring/{{ item }}"
+    mode: "0644"
+  loop: [prometheus.yml, alerts.yml, alertmanager.yml]
+
+- name: Render Netdata config
+  ansible.builtin.copy:
+    dest: /etc/vmsetup/monitoring/netdata.conf
+    mode: "0644"
+    content: |
+      [web]
+          bind to = 127.0.0.1:19999
+      [db]
+          mode = dbengine
+          dbengine tier 0 retention size = 1GiB
+
+- name: Run Netdata
+  containers.podman.podman_container:
+    name: netdata
+    image: docker.io/netdata/netdata:stable
+    state: started
+    restart_policy: always
+    network: host
+    pid: host
+    cap_add: [SYS_PTRACE, SYS_ADMIN]
+    security_opt: ["apparmor=unconfined", "label=disable"]
+    env: { DO_NOT_TRACK: "1" }
+    volumes:
+      - /etc/vmsetup/monitoring/netdata.conf:/etc/netdata/netdata.conf:ro
+      - /etc/passwd:/host/etc/passwd:ro
+      - /etc/group:/host/etc/group:ro
+      - /etc/os-release:/host/etc/os-release:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /var/log:/host/var/log:ro
+
+- name: Run node exporter
+  containers.podman.podman_container:
+    name: node-exporter
+    image: quay.io/prometheus/node-exporter:v1.12.1
+    state: started
+    restart_policy: always
+    network: host
+    pid: host
+    volumes: ["/:/host:ro,rslave"]
+    command: ["--path.rootfs=/host"]
+
+- name: Run libvirt exporter
+  containers.podman.podman_container:
+    name: libvirt-exporter
+    image: ghcr.io/inovex/prometheus-libvirt-exporter:v2.6.1
+    state: started
+    restart_policy: always
+    network: host
+    volumes: ["/var/run/libvirt:/var/run/libvirt"]
+    security_opt: ["label=disable"]
+    command: ["--web.listen-address=127.0.0.1:9177"]
+
+- name: Run Prometheus
+  containers.podman.podman_container:
+    name: prometheus
+    image: quay.io/prometheus/prometheus:v3.13.4
+    state: started
+    restart_policy: always
+    network: host
+    volumes:
+      - /etc/vmsetup/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - /etc/vmsetup/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - "--storage.tsdb.retention.time={{ monitoring.retention_days }}d"
+      - --web.listen-address=127.0.0.1:9090
+
+- name: Run Alertmanager
+  containers.podman.podman_container:
+    name: alertmanager
+    image: quay.io/prometheus/alertmanager:v0.34.1
+    state: started
+    restart_policy: always
+    network: host
+    volumes: ["/etc/vmsetup/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro"]
+    command: [--config.file=/etc/alertmanager/alertmanager.yml, --web.listen-address=127.0.0.1:9093]

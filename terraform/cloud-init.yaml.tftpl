@@ -1,0 +1,54 @@
+#cloud-config
+hostname: ${name}
+manage_etc_hosts: true
+users:
+  - name: ops
+    groups: [sudo]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    shell: /bin/bash
+    lock_passwd: true
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+ssh_pwauth: false
+package_update: true
+package_upgrade: true
+packages: [qemu-guest-agent, unattended-upgrades, curl, open-iscsi, nfs-common, prometheus-node-exporter]
+write_files:
+%{ if gitops ~}
+  - path: /var/lib/rancher/k3s/server/manifests/argocd.yaml
+    content: |
+      apiVersion: helm.cattle.io/v1
+      kind: HelmChart
+      metadata:
+        name: argocd
+        namespace: kube-system
+      spec:
+        repo: https://argoproj.github.io/argo-helm
+        chart: argo-cd
+        targetNamespace: argocd
+        createNamespace: true
+        valuesContent: |-
+          dex: { enabled: false }
+          notifications: { enabled: false }
+  - path: /var/lib/rancher/k3s/server/manifests/argocd-root.yaml
+    content: |
+      apiVersion: argoproj.io/v1alpha1
+      kind: Application
+      metadata:
+        name: root
+        namespace: argocd
+      spec:
+        project: default
+        source:
+          repoURL: ${gitops_repo_url}
+          targetRevision: ${gitops_revision}
+          path: gitops/clusters/${cluster}
+        destination:
+          server: https://kubernetes.default.svc
+          namespace: argocd
+        syncPolicy:
+          automated: { prune: true, selfHeal: true }
+%{ endif ~}
+runcmd:
+  - systemctl enable --now qemu-guest-agent
+  - curl -sfL https://get.k3s.io | K3S_TOKEN='${token}' K3S_URL='${k3s_url}' INSTALL_K3S_EXEC='${k3s_exec}' sh -

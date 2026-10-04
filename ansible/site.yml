@@ -1,0 +1,8 @@
+- name: Configure host, AI stack, monitoring and k8s tools
+  hosts: all
+  become: true
+  roles:
+    - host
+    - k8s_tools
+    - ai_stack
+    - monitoring

@@ -1,0 +1,40 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-latest-tag
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-pinned-image-tag
+      match: { any: [{ resources: { kinds: [Pod] } }] }
+      validate:
+        message: "Images must use a pinned tag, not ':latest'."
+        pattern:
+          spec:
+            containers:
+              - image: "!*:latest"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-memory-limits
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-memory-limit
+      match: { any: [{ resources: { kinds: [Pod] } }] }
+      exclude: { any: [{ resources: { namespaces: [kube-system] } }] }
+      validate:
+        message: "Containers must set a memory limit."
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  limits:
+                    memory: "?*"

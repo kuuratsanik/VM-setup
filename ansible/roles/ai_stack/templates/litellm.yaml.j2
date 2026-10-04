@@ -1,0 +1,43 @@
+model_list:
+  - model_name: default
+    litellm_params:
+{% if local_llm.enabled %}
+      model: ollama/{{ local_llm.model }}
+      api_base: http://127.0.0.1:11434
+{% else %}
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+{% endif %}
+{% if local_llm.enabled %}
+  - model_name: local
+    litellm_params:
+      model: ollama/{{ local_llm.model }}
+      api_base: http://127.0.0.1:11434
+{% endif %}
+  - model_name: cloud-small
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: cloud-frontier
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+router_settings:
+  fallbacks:
+{% if local_llm.enabled %}
+    - local: [cloud-small]
+    - default: [cloud-small]
+{% endif %}
+    - cloud-small: [cloud-frontier]
+
+litellm_settings:
+  max_budget: {{ llm_routing.cloud_budget_usd_month }}
+  budget_duration: 30d
+{% if langfuse_enabled | default(false) %}
+  success_callback: ["langfuse"]
+  failure_callback: ["langfuse"]
+{% endif %}
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

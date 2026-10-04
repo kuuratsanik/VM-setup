@@ -1,0 +1,16 @@
+resources:
+  - ../../apps/cert-manager
+  - ../../apps/sealed-secrets
+  - ../../apps/kube-prometheus-stack
+  - ../../apps/kyverno
+  - ../../apps/kyverno-policies
+  - ../../apps/loki
+  - ../../apps/alloy
+  - ../../apps/netdata
+  - ../../apps/system-upgrade-controller
+# Optional (enable per cluster by adding the line):
+#  - ../../apps/velero
+#  - ../../apps/external-secrets
+#  - ../../apps/argo-rollouts
+#  - ../../apps/cloudnative-pg
+#  - ../../apps/longhorn

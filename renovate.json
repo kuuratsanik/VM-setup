@@ -1,0 +1,9 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "argocd": { "fileMatch": ["^gitops/.+\\.yaml$"] },
+  "terraform": { "enabled": true },
+  "packageRules": [
+    { "matchUpdateTypes": ["minor", "patch"], "automerge": false }
+  ]
+}
