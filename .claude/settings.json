@@ -1,0 +1,59 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh\"",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest *)",
+      "Bash(python -m py_compile *)",
+      "Bash(node --check *)",
+      "Bash(terraform -chdir=terraform init -backend=false)",
+      "Bash(terraform -chdir=terraform validate)",
+      "Bash(terraform -chdir=terraform fmt -check*)",
+      "Bash(terraform version)",
+      "Bash(ansible-lint ansible/*)",
+      "Bash(yamllint *)",
+      "Bash(kubectl kustomize *)",
+      "Bash(kubectl version --client*)",
+      "Bash(helm version*)",
+      "Bash(k3d version)",
+      "Bash(k3d cluster create gitops-smoke*)",
+      "Bash(k3d cluster delete gitops-smoke)",
+      "Bash(k3d cluster list*)",
+      "Bash(docker info*)",
+      "Bash(docker system prune *)",
+      "Bash(bash .claude/skills/checks/run.sh*)",
+      "Bash(.claude/skills/checks/run.sh*)",
+      "Bash(python .claude/skills/jarvis-demo/demo_shots.py*)",
+      "Bash(bash .claude/skills/gitops-smoke/smoke.sh*)",
+      "Bash(git status*)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git branch)",
+      "Bash(git branch --list*)",
+      "Bash(git branch --show-current)",
+      "Bash(git branch -a)",
+      "Bash(git branch -r)",
+      "Bash(git fetch origin*)",
+      "Bash(git fetch --all)"
+    ],
+    "deny": [
+      "Bash(git diff --output*)",
+      "Bash(git log --output*)",
+      "Bash(git * --output*)",
+      "Bash(ansible-lint * --fix*)",
+      "Bash(ansible-lint * --write*)"
+    ]
+  }
+}
