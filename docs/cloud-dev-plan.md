@@ -67,7 +67,7 @@ Keep the default package-manager list and add:
   - `argoproj.github.io`, `bitnami.github.io`, `charts.external-secrets.io`, `charts.jetstack.io`
   - `charts.k8sgpt.ai`, `charts.longhorn.io`, `cloudnative-pg.github.io`, `grafana.github.io`
   - `kyverno.github.io`, `netdata.github.io`, `prometheus-community.github.io`, `vmware-tanzu.github.io`
-- Container images for k3d: `ghcr.io`, `registry-1.docker.io`, `quay.io`, `registry.k8s.io`, plus the blob CDN hosts they redirect to. Pull one image once and add the hosts the proxy reports.
+- Container images for k3d and the GitOps apps: `ghcr.io` **and its layer CDN `pkg-containers.githubusercontent.com`** (k3d's own images come from here; without it `k3d cluster create` hangs pulling `k3d-tools`/`k3d-proxy`), `quay.io`, `registry.k8s.io`, plus any further blob CDN hosts those redirect to. Docker Hub already works with the default list. After a change, run `docker pull quay.io/prometheus/busybox` and `docker pull registry.k8s.io/pause:3.9` and check `curl -sS "$HTTPS_PROXY/__agentproxy/status"` → `recentRelayFailures` for any host still denied.
 
 Use Custom rather than Full, so a prompt injection in a PR comment or fetched page can't send data anywhere.
 
