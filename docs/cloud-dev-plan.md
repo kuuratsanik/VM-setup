@@ -36,26 +36,18 @@ Reference docs: [cloud environments](https://code.claude.com/docs/en/cloud-envir
 
 ### 3.1 Setup script
 
+Set the environment's setup script to the single line:
+
 ```bash
-set -euo pipefail
-# Pins: bump here only.
-TF=1.10.5; KUBECTL=v1.31.4; HELM=v3.16.3; K3D=v5.7.4
-PLAYWRIGHT=1.56.0  # ships Chromium revision 1194, matching /opt/pw-browsers/chromium-1194 (verified)
-
-pip install -q -r agents/requirements.txt -r jarvis/requirements.txt pytest pytest-asyncio ansible-lint yamllint
-ansible-galaxy collection install -r ansible/requirements.yml || echo "WARN: ansible-galaxy failed (check network allowlist)"
-curl -fsSL https://releases.hashicorp.com/terraform/$TF/terraform_${TF}_linux_amd64.zip -o /tmp/tf.zip \
-  && unzip -oq /tmp/tf.zip terraform -d /tmp && mv /tmp/terraform /usr/local/bin/
-curl -fsSL https://dl.k8s.io/release/$KUBECTL/bin/linux/amd64/kubectl -o /usr/local/bin/kubectl && chmod +x /usr/local/bin/kubectl
-curl -fsSL https://get.helm.sh/helm-$HELM-linux-amd64.tar.gz | tar -xz -C /tmp && mv /tmp/linux-amd64/helm /usr/local/bin/
-curl -fsSL https://github.com/k3d-io/k3d/releases/download/$K3D/k3d-linux-amd64 -o /usr/local/bin/k3d && chmod +x /usr/local/bin/k3d
-
-# Last, so a wrong pin can't abort the steps above. Reuses the preinstalled Chromium.
-if [ -n "$PLAYWRIGHT" ]; then PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 pip install -q "playwright==$PLAYWRIGHT" || echo "WARN: playwright $PLAYWRIGHT failed"; else echo "WARN: PLAYWRIGHT pin not set"; fi
+bash scripts/cloud-setup.sh
 ```
 
+The pins (Terraform, kubectl, Helm, k3d, Playwright) live in `scripts/cloud-setup.sh`, which is idempotent and skips binaries already at the pinned version.
+
+The script warns and continues when a step fails and always exits 0 (so the environment is still cached); `--strict` exits 1 instead, for local verification. The SessionStart hook lists any missing tools on every session start, so a failed install is still visible.
+
 - Keep the pins equal to CI's. To find the Playwright pin, run `pip download --no-deps playwright==<ver>` and look for `"revision": "1194"` in the wheel's `browsers.json`.
-- Optionally, commit this script as `scripts/cloud-setup.sh` and make the environment's setup script just `bash scripts/cloud-setup.sh`. The pins are then versioned and reviewable. The trade-off: the cache rebuilds only when the one-line wrapper or the network setting changes, not when the repo file does, so bump the wrapper with a comment when pins change.
+- The trade-off of the one-line wrapper: the cache rebuilds only when the wrapper line or the network setting changes, not when the repo file does, so bump the wrapper with a comment (for example `bash scripts/cloud-setup.sh # pins 2026-10`) when pins change.
 - The cache keeps files, not running processes. So `dockerd` is started by the SessionStart hook (§4.2), not here.
 - Measure the script once. If it takes more than about 5 minutes, it isn't cached and every session pays for it again. In that case drop the slowest step (usually ansible-galaxy) into the hook.
 
