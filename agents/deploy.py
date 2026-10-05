@@ -29,8 +29,8 @@ def git(repo, *args):
 
 
 def git_raw(repo, *args):
-    """Like git() but without stripping, so NUL-separated output stays intact."""
-    return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=True).stdout
+    """Like git() but without stripping, so NUL-separated output stays intact; undecodable bytes in file names are kept (surrogateescape) instead of crashing."""
+    return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, errors="surrogateescape", check=True).stdout
 
 
 def regular_file(repo, sha, path):

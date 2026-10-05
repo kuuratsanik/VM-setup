@@ -1,3 +1,4 @@
+import os
 import subprocess
 from types import SimpleNamespace
 
@@ -98,7 +99,7 @@ def test_deleted_runbook_exempt(env):
     check(env, ["agents/runbooks/x.yaml"], True)
 
 
-def test_real_git_merge_and_symlink(tmp_path):
+def test_real_git_symlink_mode_and_nul_listing(tmp_path):
     import os
     r = str(tmp_path)
 
@@ -116,3 +117,24 @@ def test_real_git_merge_and_symlink(tmp_path):
     assert deploy.regular_file(r, sha, "agents/runbooks/l.yaml") is False
     assert deploy.regular_file(r, sha, "README") is True
     assert deploy.git_raw(r, "-c", "core.quotePath=false", "diff-tree", "-z", "--no-commit-id", "--name-only", "-r", sha).count("\0") == 2
+
+
+def test_undecodable_filename_is_refused_not_crash(tmp_path):
+    import subprocess as sp
+    repo = tmp_path / "r"
+    repo.mkdir()
+    sp.run(["git", "init", "-q", str(repo)], check=True)
+    sp.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
+    sp.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+    sp.run(["git", "-C", str(repo), "remote", "add", "origin", "https://example.invalid/x.git"], check=True)
+    (repo / "README").write_text("base\n")
+    sp.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    sp.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)  # diff-tree needs a parent
+    agents = repo / "agents"
+    agents.mkdir()
+    (agents / os.fsdecode(b"\xffbad.py")).write_text("x = 1\n")
+    sp.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    sp.run(["git", "-C", str(repo), "commit", "-qm", "c"], check=True)
+    sha = sp.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    # Protected path with invalid UTF-8 and a non-GitHub origin: refused (False), no UnicodeDecodeError.
+    assert deploy.approved(str(repo), sha) is False
