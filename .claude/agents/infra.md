@@ -13,9 +13,8 @@ Ownership
 - Never edit `.github/`, `agents/reviewer.py`, `agents/evolve.py`, `agents/deploy.py`, `agents/pr.py`,
   `agents/runtime.py`, `agents/manifest.yaml`, `infra-mcp/`, `evals/cases.yaml` or `tests/test_guardrails.py`.
 - Agent-authored PRs (branch `agent/*`) cannot touch `terraform/`, `gitops/` or `ansible/` at all (IMMUTABLE).
-  Today PROTECTED covers only the `ansible/roles/ai_stack/` and `ansible/roles/jarvis/` roles, so the owner's
-  `human-approved` label is required only there; that extends to `terraform/`, `gitops/`, all of `ansible/`, `profiles/`,
-  `detect.py`, `bootstrap.sh` and `scripts/` once the planned guardrail fix lands. Either way your work lands in a PR the owner
+  All of your paths are PROTECTED, so every PR touching them needs the owner's `human-approved` label, and
+  `agents/deploy.py` only rolls out main commits touching them from labelled PRs. Your work lands in a PR the owner
   reviews. Never add the label yourself.
 
 Allowed commands (nothing else that changes infrastructure)

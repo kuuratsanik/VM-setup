@@ -11,7 +11,7 @@
 
 ## Guardrails (agents/reviewer.py)
 
-- PROTECTED today (needs the owner's `human-approved` label; the planned guardrail fix extends it to `terraform/`, `gitops/`, all of `ansible/`, `profiles/`, `detect.py`, `scripts/`, `bootstrap.sh`; `agents/deploy.py` then also only rolls out main commits touching them from labelled PRs): `agents/`, `jarvis/`, `infra-mcp/`, `media-mcp/`, `training/`, `evals/`, `.github/`, `ansible/roles/ai_stack/`, `ansible/roles/jarvis/`, `profile.override.yaml`.
+- PROTECTED (needs the owner's `human-approved` label; `agents/deploy.py` also only rolls out main commits touching these from labelled PRs): `agents/`, `jarvis/`, `infra-mcp/`, `media-mcp/`, `training/`, `evals/`, `.github/`, `ansible/`, `terraform/`, `gitops/`, `profiles/`, `detect.py`, `bootstrap.sh`, `scripts/`, `profile.override.yaml`. Exception (TIER0): `.yaml`/`.md` files under `agents/runbooks/` need no label (`proposals/` is not protected at all); agent PRs touching only TIER0 files may auto-merge via `agents/automerge.py`, but note `deploy.py` still requires a labelled PR even for runbooks-only commits.
 - IMMUTABLE (agent-authored `agent/*` PRs may never touch these): `agents/reviewer.py`, `evolve.py`, `deploy.py`, `pr.py`, `runtime.py`, `redact.py`, `policy.py`, `approvals.py`, `actions.py`, `notify.py`, `automerge.py`, `autonomy.yaml`, `manifest.yaml`, `mcp_servers.yaml`, `evalgate.py` (all under `agents/`), `infra-mcp/`, `evals/cases.yaml`, `.github/`, `ansible/`, `terraform/`, `gitops/`, `training/`, `media-mcp/`, `jarvis/`, `profile.override.yaml`, `tests/test_guardrails.py`.
 - `human-approved` is the owner's label. Agents never add it.
 - Never edit paths outside your area, and never rewrite history on a shared branch.
