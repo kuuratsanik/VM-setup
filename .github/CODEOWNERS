@@ -1,7 +1,9 @@
 # Changes to these paths need review from the repo owner (enable "Require review from Code Owners" in branch protection).
 /agents/ @kuuratsanik
-# Low-risk tier (auto-merge eligible): no owner, so no required code-owner review
-/agents/runbooks/
+# Low-risk tier (auto-merge eligible, reviewer.TIER0): no owner, so no required code-owner review. Only .yaml/.md runbooks;
+# anything else under agents/runbooks/ (e.g. *.py) keeps the /agents/ owner. The last matching line wins.
+/agents/runbooks/**/*.yaml
+/agents/runbooks/**/*.md
 /proposals/
 /infra-mcp/ @kuuratsanik
 /media-mcp/ @kuuratsanik
@@ -17,3 +19,9 @@
 /detect.py @kuuratsanik
 /bootstrap.sh @kuuratsanik
 /profile.override.yaml @kuuratsanik
+/tests/ @kuuratsanik
+/.claude/ @kuuratsanik
+/CLAUDE.md @kuuratsanik
+/renovate.json @kuuratsanik
+# Any depth: attributes change how git diffs (and so how the reviewer sees) the files below them
+.gitattributes @kuuratsanik

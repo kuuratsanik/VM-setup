@@ -138,3 +138,21 @@ def test_undecodable_filename_is_refused_not_crash(tmp_path):
     sha = sp.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
     # Protected path with invalid UTF-8 and a non-GitHub origin: refused (False), no UnicodeDecodeError.
     assert deploy.approved(str(repo), sha) is False
+
+
+def test_real_git_rename_out_of_tests_into_tier0_needs_label(tmp_path):
+    """Renaming a guardrail test into a runbook deletes the test on main: deploy must not ship that unlabelled."""
+    r = str(tmp_path)
+
+    def g(*a):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "diff.renames=true", *a], cwd=r, capture_output=True, text=True, check=True).stdout.strip()
+
+    g("init", "-q", "-b", "main")
+    g("remote", "add", "origin", "https://example.invalid/x.git")  # not GitHub: a protected change is refused
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "agents/runbooks").mkdir(parents=True)
+    (tmp_path / "tests/test_guardrails.py").write_text("def test_x():\n    assert True\n")
+    g("add", "."); g("commit", "-qm", "base")
+    g("mv", "tests/test_guardrails.py", "agents/runbooks/guardrails.md")
+    g("commit", "-qm", "rename")
+    assert deploy.approved(r, g("rev-parse", "HEAD")) is False
