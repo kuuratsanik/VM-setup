@@ -23,7 +23,11 @@
     owner: root
     group: jarvis
     mode: "2770"
-    recurse: true
+
+- name: Make files under the autonomy state directory group-writable without setgid or exec bits
+  ansible.builtin.command:
+    argv: [find, /var/lib/vmsetup/autonomy, -type, f, -exec, chmod, "0660", "{}", "+"]
+  changed_when: false
 
 - name: Read the gateway key from the existing secrets file
   ansible.builtin.slurp:

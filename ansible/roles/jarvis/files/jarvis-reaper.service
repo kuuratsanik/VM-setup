@@ -7,4 +7,14 @@ User=jarvis
 WorkingDirectory=/opt/vm-setup
 EnvironmentFile=/etc/vmsetup/jarvis.env
 Environment=PYTHONPATH=/opt/vm-setup
+Environment=HOME=/var/lib/vmsetup/jarvis
 ExecStart=/opt/vm-setup/.venv/bin/python -m jarvis.reaper
+TimeoutStartSec=300
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/vmsetup/jarvis /var/lib/vmsetup/autonomy
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

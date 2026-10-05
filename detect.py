@@ -127,11 +127,14 @@ def main():
     with open(os.path.join(ROOT, "profiles", f"{name}.yaml")) as fh:
         profile = yaml.safe_load(fh)
 
+    override_path = os.path.join(ROOT, "profile.override.yaml")
+    override = {}
+    if os.path.exists(override_path):
+        with open(override_path) as fh:
+            override = yaml.safe_load(fh) or {}
+    deep_merge(profile, override)  # before size(), so clusters/workers/mgmt_vm overrides change the sizing
     result = {"profile": name, "facts": facts, **profile, **size(facts, profile)}
-    override = os.path.join(ROOT, "profile.override.yaml")
-    if os.path.exists(override):
-        with open(override) as fh:
-            deep_merge(result, yaml.safe_load(fh))
+    deep_merge(result, override)  # again, so direct pins of computed keys (nodes, host_reserve_ram_gb) still win
 
     text = json.dumps(result, indent=2)
     if args.detect_only:
