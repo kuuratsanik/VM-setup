@@ -21,6 +21,7 @@
 - name: Generate gateway key and database password
   ansible.builtin.set_fact:
     ai_stack_master_key: "sk-{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits length=40') }}"
+    ai_stack_caller_key: "sk-{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits length=40') }}"
     ai_stack_pg_password: "{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits length=32') }}"
   no_log: true
 
@@ -33,6 +34,26 @@
   loop:
     - { src: secrets.env.j2, dest: secrets.env }
     - { src: pg.env.j2, dest: pg.env }
+  no_log: true
+
+- name: Read provider keys from the secrets file
+  ansible.builtin.slurp:
+    src: /etc/vmsetup/secrets.env
+  register: ai_stack_secrets_file
+  no_log: true
+
+- name: Write the LiteLLM env file (gateway master key and provider keys only, rewritten on every run)
+  ansible.builtin.copy:
+    dest: /etc/vmsetup/litellm.env
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      {% for name in ['LITELLM_MASTER_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'OPENROUTER_API_KEY', 'LANGFUSE_PUBLIC_KEY', 'LANGFUSE_SECRET_KEY'] %}
+      {% set found = ai_stack_secrets_file.content | b64decode | regex_search('(?m)^' ~ name ~ '=(.*)$', '\\1') %}
+      {{ name }}={{ found[0] if found else '' }}
+      {% endfor %}
+  register: ai_stack_litellm_env
   no_log: true
 
 - name: Render LiteLLM config
@@ -143,7 +164,34 @@
   ansible.posix.synchronize:
     src: "{{ playbook_dir }}/../"
     dest: /opt/vm-setup/
-    rsync_opts: ["--exclude=.git", "--exclude=.venv", "--exclude=.terraform", "--exclude=__pycache__"]
+    # terraform state holds k3s join tokens and tfvars may hold secrets: never copy them where the jarvis user can read
+    rsync_opts:
+      - "--exclude=.git"
+      - "--exclude=.venv"
+      - "--exclude=.terraform"
+      - "--exclude=__pycache__"
+      - "--exclude=*.tfstate*"
+      - "--exclude=*.tfvars"
+      - "--exclude=profile.generated.json"
+      - "--chmod=go-w"
+
+- name: Remove secret-bearing files left by earlier copies
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /opt/vm-setup/terraform/terraform.tfstate
+    - /opt/vm-setup/terraform/terraform.tfstate.backup
+    - /opt/vm-setup/terraform/terraform.tfvars
+    - /opt/vm-setup/terraform/.terraform
+
+- name: Install the generated profile (no secrets; read by the agents and by jarvis status)
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../profile.generated.json"
+    dest: /opt/vm-setup/profile.generated.json
+    owner: root
+    group: root
+    mode: "0644"
 
 - name: Create agent virtualenv
   ansible.builtin.pip:
@@ -165,12 +213,12 @@
     name: litellm
     image: ghcr.io/berriai/litellm:main-stable
     state: started
-    recreate: "{{ ai_stack_litellm_config.changed }}"
+    recreate: "{{ ai_stack_litellm_config.changed or ai_stack_litellm_env.changed }}"
     restart_policy: always
     network: host
     volumes: ["/etc/vmsetup/litellm.yaml:/app/config.yaml:ro"]
     command: ["--config", "/app/config.yaml", "--host", "127.0.0.1"]
-    env_file: /etc/vmsetup/secrets.env
+    env_file: /etc/vmsetup/litellm.env
     env: "{{ {'PHOENIX_COLLECTOR_HTTP_ENDPOINT': 'http://127.0.0.1:6006/v1/traces'} if ai_stack_phoenix | bool else {} }}"
 
 - name: Install agent services and timers

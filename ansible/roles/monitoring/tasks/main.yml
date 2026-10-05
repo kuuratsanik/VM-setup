@@ -51,7 +51,7 @@
     network: host
     pid: host
     volumes: ["/:/host:ro,rslave"]
-    command: ["--path.rootfs=/host"]
+    command: ["--path.rootfs=/host", "--web.listen-address=127.0.0.1:9100"]
 
 - name: Run libvirt exporter
   containers.podman.podman_container:

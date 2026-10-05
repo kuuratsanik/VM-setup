@@ -10,11 +10,24 @@
     enabled: true
     state: started
 
-- name: Allow guest DNS and metadata traffic into the host from the k8s bridge
+- name: Remove the old unrestricted allow rule for the k8s bridge (the ufw module only adds rules)
   community.general.ufw:
     rule: allow
     direction: in
     interface: virbr-k8s
+    delete: true
+
+- name: Allow only guest DNS and DHCP into the host from the k8s bridge (guests use static IPs, 10.10.10.1 as resolver)
+  community.general.ufw:
+    rule: allow
+    direction: in
+    interface: virbr-k8s
+    port: "{{ item.port }}"
+    proto: "{{ item.proto }}"
+  loop:
+    - { port: "53", proto: tcp }
+    - { port: "53", proto: udp }
+    - { port: "67", proto: udp }
 
 - name: Allow routed guest traffic out via the host
   community.general.ufw:
