@@ -81,6 +81,7 @@ function buildTabs() {
 }
 function open(t) {
   current = t; buildTabs();
+  if (notice.dataset.tab === t) { notice.textContent = ""; delete notice.dataset.tab; } // the user is now on the tab the notice refers to
   for (const name of TABS) $("tab-" + name.toLowerCase()).classList.toggle("hidden", name !== t);
   pollErr.classList.toggle("hidden", t !== "Overview");
   runTab(t);
@@ -88,12 +89,15 @@ function open(t) {
 const RENDERERS = { Overview: renderOverview, Autonomy: renderAutonomy, Compute: renderCompute, Setup: renderSetup, Incidents: renderIncidents };
 async function runTab(t, ...args) {
   const fn = RENDERERS[t]; if (!fn) return;
-  if (t !== current) return; // a post-action re-render for a tab the user already left must not abort the current tab's load
+  if (t !== current) { if (typeof args[0] === "string" && args[0]) notify(t, args[0]); return; } // surface the result of an action finished after the user left; a post-action re-render for a tab the user already left must not abort the current tab's load
   const signal = newSignal();
   try { await fn(signal, ...args); }
   catch (e) { if (!isAbort(e) && e.message !== "login required") $("tab-" + t.toLowerCase()).replaceChildren(h("p", { class: "err", role: "alert" }, "Error: " + e.message), ...(typeof args[0] === "string" && args[0] ? [h("p", { class: "muted" }, "Earlier result: " + args[0])] : [])); }
 }
 // Timer refresh: keep the existing content, report a failed poll in a small status line.
+// Global status line for results that finish after the user has left the tab they belong to.
+const notice = h("p", { class: "muted", role: "status" });
+function notify(tab, text) { if (!notice.isConnected) $("tab-overview").before(notice); notice.dataset.tab = tab; notice.textContent = ""; notice.textContent = tab + ": " + text; } // clear first so an identical repeat is re-announced
 const pollErr = h("p", { class: "err", role: "status" });
 const setPoll = (t) => { if (pollErr.textContent !== t) pollErr.textContent = t; }; // unchanged text must not be re-announced every poll
 async function pollOverview() {
@@ -241,7 +245,9 @@ async function renderAutonomy(signal, msg = "") {
     catch (e) { text = failText(e); if (!settled(e)) { btns.forEach((b) => { b.disabled = false; }); note.textContent = text; return; } }
     await runTab("Autonomy", text); // re-render first; message goes on the new element
   };
-  $("tab-autonomy").replaceChildren(
+  const panel = $("tab-autonomy"); // a panel with no focusable content must itself be reachable by keyboard
+  if (approvals.length || breaker.tripped) panel.removeAttribute("tabindex"); else panel.tabIndex = 0;
+  panel.replaceChildren(
     h("div", { class: "grid" },
       h("div", { class: "card" }, h("h3", {}, "Mode"), h("div", {}, val(a.mode)), h("div", { class: "muted" }, "Changed only by a reviewed PR to agents/autonomy.yaml"), h("div", { class: "err", role: "status" }, a.error || "")),
       h("div", { class: "card" }, h("h3", {}, "Circuit breaker"), h("div", {}, dot(a.breaker == null ? "" : breaker.tripped ? "bad" : "ok"), a.breaker == null ? DASH : breaker.tripped ? "tripped: " + val(breaker.reason) : "closed"), breaker.tripped ? h("button", { onclick: async (ev) => {

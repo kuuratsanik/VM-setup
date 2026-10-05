@@ -1,4 +1,4 @@
-:root { color-scheme: dark; --bg: #0b1020; --card: #141b30; --line: #263050; --fg: #e6ebff; --muted: #8e9bc4; --ok: #3ecf8e; --bad: #ff6b6b; --acc: #5b8cff; }
+:root { color-scheme: dark; --bg: #0b1020; --card: #141b30; --line: #263050; --field-line: #68759f; --fg: #e6ebff; --muted: #8e9bc4; --ok: #3ecf8e; --bad: #ff6b6b; --acc: #5b8cff; }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, sans-serif; }
 .hidden { display: none !important; }
@@ -34,3 +34,4 @@ a { color: var(--acc); }
 ::placeholder { color: var(--muted); opacity: 1; }
 a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
 button.on:focus-visible, nav button:focus-visible { outline-color: var(--acc); }
+input, select, textarea, button.secondary { border-color: var(--field-line); } /* 1.38:1 -> 3.93:1 on field, 3.77:1 on card (WCAG 1.4.11) */
