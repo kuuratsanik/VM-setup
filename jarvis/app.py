@@ -1,4 +1,5 @@
 """Jarvis web dashboard: login, status, chat with tools, voice and image, provider setup, and GPU compute."""
+import asyncio
 import os
 import re
 import subprocess
@@ -11,6 +12,7 @@ from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -98,14 +100,27 @@ def create_app(compute=None, hub=None, start_tools=True):
     async def auth_state(request: Request):
         return {"configured": auth.configured(), "logged_in": bool(session_user(request)), "totp": auth.totp_enabled()}
 
+    # One per app; state is guarded by auth._lock (single-process service). Saturation answers 429 for everyone,
+    # including the owner: a token bucket or per-client slot would turn the owner away just the same, and this is
+    # already strictly better than hashing inline on the event loop.
+    login_slots = asyncio.Semaphore(4)
+
     @app.post("/api/login")
     async def login(body: Login, request: Request):
         if not auth.configured():
             raise HTTPException(503, "no account yet: run `python -m jarvis.manage set-password` on the host")
-        ip = request.client.host if request.client else "?"
-        if auth.locked(ip):
-            raise HTTPException(429, "too many attempts; try again later")
-        if not auth.verify(ip, body.username, body.password, body.code):
+        ip = auth.client_ip(request)
+        wait = auth.retry_after(ip)
+        if wait and not auth.totp_enabled():
+            raise HTTPException(429, "too many attempts; try again later", headers={"Retry-After": str(wait)})
+        if login_slots.locked():  # all hashing slots busy: refuse instantly instead of queueing work for an attacker
+            raise HTTPException(429, "too many attempts; try again later", headers={"Retry-After": "1"})
+        async with login_slots:  # argon2 is ~100 ms of CPU: keep it off the event loop
+            ok = await run_in_threadpool(auth.verify, ip, body.username, body.password, body.code)
+        if not ok:
+            if wait:  # locked + TOTP: a failed bypass is always 429, whether password or code was wrong
+                raise HTTPException(429, "too many attempts; try again later", headers={"Retry-After": str(wait)})
+            await asyncio.sleep(auth.tarpit_delay())  # global failure tarpit; correct logins are never delayed
             raise HTTPException(401, "invalid credentials")
         request.session.clear()
         request.session["user"] = body.username

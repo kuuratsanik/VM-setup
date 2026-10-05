@@ -1,3 +1,5 @@
+import time
+
 import pyotp
 import pytest
 
@@ -48,4 +50,6 @@ def test_totp_is_required_only_after_confirmation():
     assert auth.confirm_totp(pyotp.TOTP(secret).now()) and auth.totp_enabled()
     assert not auth.verify("1.1.1.1", "owner", "correct horse battery")
     assert not auth.verify("1.1.1.1", "owner", "correct horse battery", "000000")
-    assert auth.verify("1.1.1.1", "owner", "correct horse battery", pyotp.TOTP(secret).now())
+    assert not auth.verify("1.1.1.1", "owner", "correct horse battery", pyotp.TOTP(secret).now())  # the confirm code cannot be reused
+    later = time.time() + 30  # a code from the next time step
+    assert auth.verify("1.1.1.1", "owner", "correct horse battery", pyotp.TOTP(secret).at(later), now=later)

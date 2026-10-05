@@ -79,6 +79,8 @@ Try it without hardware: `python -m jarvis.demo` serves the dashboard on `127.0.
 
 Dashboard security: Argon2id password, optional TOTP, lockout after 5 failures per address, `SameSite=Strict` HttpOnly session, custom header plus Origin check on every write, strict CSP, no secrets ever returned by the API.
 
+Behind a reverse proxy, set `JARVIS_TRUSTED_PROXIES` (comma-separated IPs/CIDRs of the proxy, e.g. `127.0.0.1`) in `/etc/vmsetup/jarvis.env`. Jarvis then keys the lockout on the right-most untrusted `X-Forwarded-For` address. Left unset, every client shares the proxy's address and a few wrong passwords lock everyone out (Jarvis logs a warning when it sees this). Enable TOTP (`enroll-totp`) as well: with TOTP, the right password plus a valid code still signs in while the address is locked, so an attacker who does not know the password cannot lock the owner out. Someone who does know the password can burn the per-account budget of 10 wrong-code attempts per 15 minutes while locked and block that bypass; Jarvis then logs a WARNING and you should rotate the password. A TOTP code works once (replays are refused). Lockout state lives in `lockout.json` in the Jarvis state dir.
+
 ## Autonomy: what runs by itself and what waits for you
 Every state-changing action passes through one policy engine (`agents/policy.py`, configured in `agents/autonomy.yaml`). The mode is one line:
 
