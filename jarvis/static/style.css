@@ -5,7 +5,7 @@ body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 syste
 .muted { color: var(--muted); }
 .err { color: var(--bad); }
 header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; background: var(--card); border-bottom: 1px solid var(--line); }
-nav { display: flex; gap: 4px; flex: 1; }
+nav { flex: 1; } #tabs { display: flex; gap: 4px; }
 nav button, .link { background: none; border: 0; color: var(--muted); padding: 6px 12px; cursor: pointer; border-radius: 6px; }
 nav button.on { color: var(--fg); background: var(--line); }
 main { padding: 16px; max-width: 1100px; margin: 0 auto; }
@@ -13,16 +13,16 @@ main { padding: 16px; max-width: 1100px; margin: 0 auto; }
 form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 #login-form { flex-direction: column; align-items: stretch; }
 input, select, textarea, button { background: #0f1630; color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: inherit; }
-button { cursor: pointer; background: var(--acc); border-color: var(--acc); color: #fff; }
+button { cursor: pointer; background: var(--acc); border-color: var(--acc); color: var(--bg); } /* dark text: white on --acc was 3.16:1 */
 button.secondary { background: none; border-color: var(--line); color: var(--fg); }
-button.danger { background: var(--bad); border-color: var(--bad); }
+button.danger { background: var(--bad); border-color: var(--bad); color: var(--bg); } /* white on --bad was 2.78:1 */
 textarea { width: 100%; min-height: 140px; font-family: ui-monospace, monospace; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
 .card h3 { margin: 0 0 8px; font-size: 14px; color: var(--muted); font-weight: 600; }
 .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; }
 .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
-.badge { padding: 2px 8px; border-radius: 999px; font-size: 12px; } .badge.bad { background: var(--bad); }
+.badge { padding: 2px 8px; border-radius: 999px; font-size: 12px; } .badge.bad { background: var(--bad); color: var(--bg); }
 table { width: 100%; border-collapse: collapse; } td, th { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
 #log { height: 55vh; overflow-y: auto; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-bottom: 10px; }
 .msg { margin: 6px 0; white-space: pre-wrap; } .msg.user { color: var(--acc); } .msg.tool { color: var(--muted); font-size: 13px; }
@@ -30,3 +30,7 @@ table { width: 100%; border-collapse: collapse; } td, th { padding: 6px 8px; bor
 #msg { flex: 1; min-width: 200px; }
 img.gen { max-width: 100%; border-radius: 8px; }
 a { color: var(--acc); }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
+::placeholder { color: var(--muted); opacity: 1; }
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+button.on:focus-visible, nav button:focus-visible { outline-color: var(--acc); }
