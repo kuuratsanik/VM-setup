@@ -1,0 +1,9 @@
+# Workstation override (4 cores, 30 GB RAM shared with a live workload, /ext-pool for VM disks).
+# Copy to the repo root as profile.override.yaml before running bootstrap.sh (see INSTALL.md).
+# The auto-sizer would give the worker ~21 GB RAM / 200 GB disk, which would starve the host, so the
+# two nodes are pinned directly. Direct node pins win on both the old and the PR #18 detect.py.
+host_reserve_ram_gb: 12   # informational: RAM left to the existing workload
+nodes:
+  hub-s1: { vcpu: 2, ram_gb: 3, disk_gb: 30 }
+  hub-a1: { vcpu: 2, ram_gb: 6, disk_gb: 60 }
+monitoring: { scrape_interval: 60s, retention_days: 7, loki: false }
