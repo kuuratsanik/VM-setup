@@ -2,3 +2,4 @@
 *.tfstate*
 __pycache__/
 profile.generated.json
+training/data/
