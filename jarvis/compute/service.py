@@ -35,6 +35,10 @@ class Compute:
             if not NAME_RE.match(str(args.get("name", ""))):
                 raise ValueError("name must be lowercase letters, digits and dashes")
             return await self.runpod().create_pod(args["name"], args["gpu_type"], hours=float(args.get("hours", 2)))
+        if name == "runpod_terminate_pod":
+            pod_id = str(args.get("pod_id", ""))
+            await self.runpod().terminate(pod_id)
+            return {"terminated": pod_id}
         if name == "kaggle_status":
             return await self.kaggle().status(str(args.get("ref", "")))
         if name == "kaggle_run_script":

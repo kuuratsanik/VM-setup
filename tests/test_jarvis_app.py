@@ -450,3 +450,108 @@ async def test_discard_during_failing_compute_confirm_is_not_resurrected():
     with pytest.raises(RuntimeError):
         await task
     assert pid not in hub.pending and not hub.inflight and not hub.discarded
+
+
+def test_terminate_is_queued_and_only_runs_on_confirm(client):
+    login(client)
+    resp = client.post("/api/compute/runpod/pods/pod_abc1/terminate", headers=H)
+    assert resp.status_code == 200 and list(resp.json()) == ["pending"]
+    assert client.compute.ran == []  # proposing never executes
+    done = client.post(f"/api/actions/{resp.json()['pending']}/confirm", headers=H)
+    assert done.status_code == 200 and client.compute.ran == [("runpod_terminate_pod", {"pod_id": "pod_abc1"})]
+    assert client.post(f"/api/actions/{resp.json()['pending']}/confirm", headers=H).status_code == 404
+
+
+def test_terminate_rejects_odd_pod_ids_and_needs_login(client):
+    assert client.post("/api/compute/runpod/pods/p1/terminate", headers=H).status_code == 401
+    login(client)
+    assert client.post("/api/compute/runpod/pods/bad..id/terminate", headers=H).status_code == 422
+
+
+def test_confirm_maps_provider_errors_to_502_without_leaking_body(client):
+    import httpx
+
+    login(client)
+
+    async def refuse(name, args):
+        req = httpx.Request("DELETE", "https://rest.runpod.io/v1/pods/x")
+        raise httpx.HTTPStatusError("boom secret-body", request=req, response=httpx.Response(404, request=req, text="secret-body"))
+
+    client.compute.run = refuse
+    pid = client.post("/api/compute/runpod/pods/pod1/terminate", headers=H).json()["pending"]
+    resp = client.post(f"/api/actions/{pid}/confirm", headers=H)
+    assert resp.status_code == 502 and "secret" not in resp.text and "404" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("path,body", [
+    ("/api/compute/runpod/pods", {"name": "Bad Name!", "gpu_type": "NVIDIA L4", "hours": 1}),
+    ("/api/compute/runpod/pods", {"name": "x" * 41, "gpu_type": "NVIDIA L4", "hours": 1}),
+    ("/api/compute/runpod/pods", {"name": "ok", "gpu_type": "NVIDIA L4", "hours": 0}),
+    ("/api/compute/runpod/pods", {"name": "ok", "gpu_type": "NVIDIA L4", "hours": -1}),
+    ("/api/compute/runpod/pods", {"name": "ok", "gpu_type": "NVIDIA L4", "hours": 1000}),
+    ("/api/compute/runpod/pods", {"name": "ok", "gpu_type": "", "hours": 1}),
+    ("/api/compute/runpod/pods", {"name": "ok", "gpu_type": "Nonexistent GPU", "hours": 1}),
+    ("/api/compute/kaggle/run", {"slug": "../etc", "code": "print(1)"}),
+    ("/api/compute/kaggle/run", {"slug": "owner/name", "code": "print(1)"}),
+    ("/api/compute/kaggle/run", {"slug": "ab", "code": "print(1)"}),
+    ("/api/compute/kaggle/run", {"slug": "abc", "code": "x" * 200_001}),
+])
+def test_compute_input_is_validated_on_arrival(client, path, body):
+    login(client)
+    assert client.post(path, headers=H, json=body).status_code == 422
+    assert client.compute.ran == []
+
+
+def test_login_lockout_returns_429(client):
+    auth.set_password("owner", "correct horse battery")
+    bad = {"username": "owner", "password": "wrong password!!"}
+    for _ in range(auth.MAX_ATTEMPTS):
+        assert client.post("/api/login", headers=H, json=bad).status_code == 401
+    assert client.post("/api/login", headers=H, json=bad).status_code == 429
+    good = {"username": "owner", "password": "correct horse battery"}
+    assert client.post("/api/login", headers=H, json=good).status_code == 429  # locked even with the right password
+
+
+def test_no_terminate_tool_is_offered_to_the_model_or_runnable_from_chat():
+    import asyncio
+
+    from jarvis.chat import LOCAL_TOOLS
+
+    assert not [n for n in LOCAL_TOOLS if "terminate" in n]
+    hub = Hub(FakeCompute())
+    assert not hub.needs_confirmation("runpod_terminate_pod")
+    assert asyncio.run(hub.execute("runpod_terminate_pod", {"pod_id": "p1"})) == "error: unknown tool"  # a model-issued call never reaches compute
+    assert hub.compute.ran == []
+
+
+def test_queued_terminate_with_invalid_id_fails_cleanly_at_confirm(tmp_path, monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(auth, "STATE_DIR", tmp_path)
+    monkeypatch.setenv("JARVIS_SESSION_SECRET", "test-secret-test-secret")
+    auth._attempts.clear()
+    calls = []
+    compute = Compute(env={"RUNPOD_API_KEY": "rpa_" + "k" * 12}, runpod_transport=httpx.MockTransport(lambda r: calls.append(r) or httpx.Response(200, json=[])))
+    hub = Hub(compute)
+    with TestClient(create_app(compute=compute, hub=hub, start_tools=False)) as c:
+        login(c)
+        pid = hub.queue("runpod_terminate_pod", {"pod_id": "../x"})
+        resp = c.post(f"/api/actions/{pid}/confirm", headers=H)
+        assert resp.status_code == 400 and "invalid pod id" in resp.json()["detail"] and calls == []
+        good = c.post("/api/compute/runpod/pods/pod1/terminate", headers=H).json()["pending"]
+        assert hub.pending[good]["args"] == {"pod_id": "pod1"}  # no name known: the list is empty
+
+
+def test_pod_name_on_the_confirm_card_is_printable_ascii(tmp_path, monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(auth, "STATE_DIR", tmp_path)
+    monkeypatch.setenv("JARVIS_SESSION_SECRET", "test-secret-test-secret")
+    auth._attempts.clear()
+    pods = [{"id": "pod1", "name": "safe\u202e\x07name"}]
+    compute = Compute(env={"RUNPOD_API_KEY": "rpa_" + "k" * 12}, runpod_transport=httpx.MockTransport(lambda r: httpx.Response(200, json=pods)))
+    hub = Hub(compute)
+    with TestClient(create_app(compute=compute, hub=hub, start_tools=False)) as c:
+        login(c)
+        pid = c.post("/api/compute/runpod/pods/pod1/terminate", headers=H).json()["pending"]
+        assert hub.pending[pid]["args"] == {"pod_id": "pod1", "name": "safename"}

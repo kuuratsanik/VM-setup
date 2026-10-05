@@ -39,6 +39,8 @@ LOCAL_TOOLS = {
         "slug": {"type": "string"}, "code": {"type": "string"}, "gpu": {"type": "boolean"}}, True),
 }
 
+REST_ONLY = {"runpod_terminate_pod"}  # queued only by the REST endpoint, never offered to or callable by the model; run only via confirm
+
 
 def contains_secret(text):
     return bool(SECRET_RE.search(text or ""))
@@ -79,7 +81,9 @@ class Hub:
         route = self.routes.get(name)
         return bool(route and route[0] == "infra" and route[2] in runtime.MUTATING)
 
-    async def execute(self, name, args):
+    async def execute(self, name, args, confirmed=False):
+        if confirmed and name in REST_ONLY:
+            return json.dumps(await self.compute.run(name, args))[:4000]
         if name in LOCAL_TOOLS:
             return json.dumps(await self.compute.run(name, args))[:4000]
         if name not in self.routes:
@@ -109,7 +113,7 @@ class Hub:
         if item is not None:
             self.inflight.add(pid)
             try:
-                return await self.execute(item["name"], item["args"])
+                return await self.execute(item["name"], item["args"], confirmed=True)
             except Exception:  # the pop above is synchronous (double-click safe); a failed run must stay retryable
                 if pid not in self.discarded:  # unless the owner discarded it while it ran
                     self.pending[pid] = item

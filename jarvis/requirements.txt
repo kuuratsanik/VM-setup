@@ -10,3 +10,4 @@ openai>=1.40
 mcp>=1.2,<2
 pyyaml
 psycopg[binary]>=3.2
+pytest-asyncio>=0.23

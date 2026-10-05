@@ -1,5 +1,6 @@
 """Jarvis web dashboard: login, status, chat with tools, voice and image, provider setup, and GPU compute."""
 import os
+import re
 import subprocess
 import sys
 from contextlib import asynccontextmanager
@@ -9,7 +10,7 @@ import httpx
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.sessions import SessionMiddleware
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -20,8 +21,9 @@ from jarvis import auth, providers, status  # noqa: E402
 import approvals  # noqa: E402
 from policy import Policy  # noqa: E402
 from jarvis.chat import ActionInProgress, Chat, Hub, history_has_secret  # noqa: E402
-from jarvis.compute.runpod import GPUS  # noqa: E402
-from jarvis.compute.service import Compute, NotConfigured  # noqa: E402
+from jarvis.compute.kaggle import SLUG_RE  # noqa: E402
+from jarvis.compute.runpod import GPUS, POD_ID_RE  # noqa: E402
+from jarvis.compute.service import NAME_RE, Compute, NotConfigured  # noqa: E402
 
 STATIC = Path(__file__).resolve().parent / "static"
 MODELS = ["default", "cloud-small", "cloud-frontier", "local"]
@@ -46,14 +48,21 @@ class KeyIn(BaseModel):
 
 
 class PodIn(BaseModel):
-    name: str
-    gpu_type: str
-    hours: float = 2.0
+    name: str = Field(pattern=NAME_RE.pattern)  # same rule compute/service.py enforces at confirm
+    gpu_type: str = Field(min_length=1, max_length=80)
+    hours: float = Field(default=2.0, gt=0, le=24)  # confirm applies the stricter JARVIS_RUNPOD_MAX_HOURS (default 4)
+
+    @field_validator("gpu_type")
+    @classmethod
+    def _known_gpu(cls, v):
+        if v not in GPUS:
+            raise ValueError("unsupported GPU type")
+        return v
 
 
 class KaggleIn(BaseModel):
-    slug: str
-    code: str = Field(max_length=200_000)
+    slug: str = Field(pattern=SLUG_RE.pattern)  # same rule compute/kaggle.py enforces at confirm
+    code: str = Field(min_length=1, max_length=200_000)
     gpu: bool = True
 
 
@@ -185,6 +194,10 @@ def create_app(compute=None, hub=None, start_tools=True):
             raise HTTPException(404, "unknown or expired action")
         except ActionInProgress:
             raise HTTPException(409, "that action is already being confirmed")
+        except httpx.HTTPStatusError as exc:  # the provider refused: relay only its status, never its body or headers
+            raise HTTPException(502, f"provider returned HTTP {exc.response.status_code}")
+        except httpx.HTTPError:
+            raise HTTPException(502, "could not reach the provider")
         except Exception as exc:  # NotConfigured, SpendGuard, provider errors: tell the owner why
             raise HTTPException(400, str(exc)[:300])
 
@@ -258,11 +271,16 @@ def create_app(compute=None, hub=None, start_tools=True):
 
     @app.post("/api/compute/runpod/pods/{pod_id}/terminate")
     async def pod_terminate(pod_id: str, user: str = Depends(owner)):
+        if not POD_ID_RE.match(pod_id):
+            raise HTTPException(422, "invalid pod id")
+        args = {"pod_id": pod_id}
         try:
-            await compute.runpod().terminate(pod_id)
-        except NotConfigured as exc:
-            raise HTTPException(400, str(exc))
-        return {"terminated": pod_id}
+            name = next((p["name"] for p in await compute.runpod().list_pods() if p["id"] == pod_id), None)
+        except Exception:  # the name is only a courtesy for the confirm card
+            name = None
+        if name:
+            args["name"] = re.sub(r"[^\x20-\x7e]", "", str(name))[:80]  # printable ASCII only: no bidi/control chars on the confirm card
+        return {"pending": hub.queue("runpod_terminate_pod", args)}
 
     @app.post("/api/compute/kaggle/run")
     async def kaggle_run(body: KaggleIn, user: str = Depends(owner)):
