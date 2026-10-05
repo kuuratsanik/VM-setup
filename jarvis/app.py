@@ -10,7 +10,7 @@ import httpx
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -21,9 +21,9 @@ from jarvis import auth, providers, status  # noqa: E402
 import approvals  # noqa: E402
 from policy import Policy  # noqa: E402
 from jarvis.chat import ActionInProgress, Chat, Hub, history_has_secret  # noqa: E402
-from jarvis.compute.kaggle import SLUG_RE  # noqa: E402
+from jarvis.compute.models import KaggleIn, PodIn  # noqa: E402
 from jarvis.compute.runpod import GPUS, POD_ID_RE  # noqa: E402
-from jarvis.compute.service import NAME_RE, Compute, NotConfigured  # noqa: E402
+from jarvis.compute.service import Compute, NotConfigured  # noqa: E402
 
 STATIC = Path(__file__).resolve().parent / "static"
 MODELS = ["default", "cloud-small", "cloud-frontier", "local"]
@@ -45,25 +45,6 @@ class ChatIn(BaseModel):
 
 class KeyIn(BaseModel):
     values: dict[str, str]
-
-
-class PodIn(BaseModel):
-    name: str = Field(pattern=NAME_RE.pattern)  # same rule compute/service.py enforces at confirm
-    gpu_type: str = Field(min_length=1, max_length=80)
-    hours: float = Field(default=2.0, gt=0, le=24)  # confirm applies the stricter JARVIS_RUNPOD_MAX_HOURS (default 4)
-
-    @field_validator("gpu_type")
-    @classmethod
-    def _known_gpu(cls, v):
-        if v not in GPUS:
-            raise ValueError("unsupported GPU type")
-        return v
-
-
-class KaggleIn(BaseModel):
-    slug: str = Field(pattern=SLUG_RE.pattern)  # same rule compute/kaggle.py enforces at confirm
-    code: str = Field(min_length=1, max_length=200_000)
-    gpu: bool = True
 
 
 def create_app(compute=None, hub=None, start_tools=True):

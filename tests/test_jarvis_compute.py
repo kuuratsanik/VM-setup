@@ -252,3 +252,78 @@ async def test_failed_create_removes_its_provisional_entry(tmp_path):
     with pytest.raises(httpx.HTTPStatusError):
         await rp.create_pod("x", "NVIDIA L4", hours=1)
     assert json.loads((tmp_path / "pods.json").read_text()) == {}
+
+
+@pytest.mark.asyncio
+async def test_spend_guard_terminates_pod_and_removes_provisional_entry(tmp_path):
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path.rsplit("/", 1)[-1]))
+        return httpx.Response(200, json={"id": "p7", "costPerHr": 9.0}) if request.method == "POST" else httpx.Response(200, json={})
+
+    rp = runpod(handler, tmp_path, max_hourly_usd=1.0)
+    with pytest.raises(SpendGuard):
+        await rp.create_pod("big", "NVIDIA A100-SXM4-80GB")
+    assert ("DELETE", "p7") in calls
+    assert json.loads((tmp_path / "pods.json").read_text()) == {}
+
+
+def _lister(pods, deleted):
+    def handler(request):
+        if request.method == "DELETE":
+            deleted.append(request.url.path.rsplit("/", 1)[1])
+            pods.pop(deleted[-1], None)
+            return httpx.Response(200, json={})
+        return httpx.Response(200, json=[{"id": k, "name": v} for k, v in pods.items()])
+    return handler
+
+
+def test_shield_comparison_tolerates_name_normalisation(tmp_path):
+    rp = runpod(lambda r: httpx.Response(200, json={}), tmp_path)
+    rp._save({"pending:a": {"provisional_name": "jarvis-race", "expires_at": 10**12}})
+    assert rp._shielded({"id": "p1", "name": "Jarvis-Race "}, 100) == (True, True)
+    assert rp._shielded({"id": "p1", "name": "jarvis-other"}, 100) == (False, True)
+
+
+@pytest.mark.asyncio
+async def test_owner_pods_with_odd_names_are_never_reaped_and_real_orphans_warn(tmp_path, caplog):
+    import logging
+
+    pods, deleted = {"d": "Jarvis-Dev", "x": " jarvis-x ", "o": "jarvis-orphan"}, []
+    rp = runpod(_lister(pods, deleted), tmp_path)
+    rp._save({"pending:a": {"provisional_name": "jarvis-other", "expires_at": 10**12}})
+    with caplog.at_level(logging.WARNING):
+        assert await rp.reap(now=100) == ["o"]  # only the exact jarvis- prefix; the others are the owner's
+    assert "create is in flight" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_tracked_pod_with_corrupt_entry_survives_and_is_repaired(tmp_path, caplog):
+    import logging
+
+    pods, deleted = {"a": "jarvis-a", "b": "jarvis-b"}, []
+    rp = runpod(_lister(pods, deleted), tmp_path, max_ttl_hours=2)
+    (tmp_path / "pods.json").write_text(json.dumps({"a": {"expires_at": "123"}, "b": "garbage", "pending:x": [1], "gone": None}))
+    with caplog.at_level(logging.WARNING):
+        assert await rp.reap(now=1000) == []  # fail closed: nothing is terminated on this pass
+    reg = json.loads((tmp_path / "pods.json").read_text())
+    assert set(reg) == {"a", "b"} and reg["a"] == {"name": "jarvis-a", "expires_at": 1000 + 2 * 3600}  # repaired; junk and pending:x dropped
+    assert "corrupt" in caplog.text
+    assert await rp.reap(now=1000 + 3 * 3600) == ["a", "b"]  # the TTL then reaps them normally
+
+
+@pytest.mark.asyncio
+async def test_unreadable_registry_file_disables_orphan_reaping(tmp_path, caplog):
+    import logging
+
+    pods, deleted = {"o": "jarvis-orphan"}, []
+    rp = runpod(_lister(pods, deleted), tmp_path)
+    for content in ("[1, 2]", "{not json"):
+        (tmp_path / "pods.json").write_text(content)
+        with caplog.at_level(logging.ERROR):
+            assert await rp.reap(now=100) == [] and deleted == []
+        assert (tmp_path / "pods.json").read_text() == content  # left untouched for the owner
+    assert "unreadable" in caplog.text
+    (tmp_path / "pods.json").unlink()  # a missing file is a healthy empty registry: orphans are reaped
+    assert await rp.reap(now=100) == ["o"]

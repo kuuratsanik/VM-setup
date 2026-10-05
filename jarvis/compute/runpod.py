@@ -1,7 +1,9 @@
 """RunPod through its REST API (https://rest.runpod.io/v1) with spend guards: hourly cap, short TTL, reaper."""
+import asyncio
 import contextlib
 import fcntl
 import json
+import logging
 import os
 import re
 import secrets
@@ -12,6 +14,7 @@ from pathlib import Path
 
 import httpx
 
+log = logging.getLogger(__name__)
 BASE = "https://rest.runpod.io/v1"
 STATE = Path(os.environ.get("JARVIS_STATE_DIR", "/var/lib/vmsetup/jarvis")) / "runpod-pods.json"
 GPUS = [
@@ -26,6 +29,17 @@ POD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _REGISTRY_LOCK = threading.Lock()  # in-process callers; the reaper is a separate process, so _locked() also takes a flock
 
 
+def _norm(name):
+    """Compare pod names loosely: RunPod may normalise case or whitespace."""
+    return str(name or "").casefold().strip()
+
+
+def _expiry(entry):
+    """The entry's expires_at as a number, or None if the entry is corrupt (hand-edited, wrong type)."""
+    value = entry.get("expires_at") if isinstance(entry, dict) else None
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
 class SpendGuard(Exception):
     pass
 
@@ -35,11 +49,18 @@ class RunPod:
         self.max_hourly_usd, self.max_ttl_hours, self.state = max_hourly_usd, max_ttl_hours, state
         self.client = httpx.AsyncClient(base_url=BASE, headers={"Authorization": f"Bearer {key}"}, timeout=30, transport=transport)
 
-    def _registry(self):
+    def _read(self):
+        """(registry, ok). A missing file is an empty, healthy registry; unreadable or non-object content is not ok."""
         try:
-            return json.loads(self.state.read_text())
+            reg = json.loads(self.state.read_text())
+        except FileNotFoundError:
+            return {}, True
         except (OSError, ValueError):
-            return {}
+            return {}, False
+        return (reg, True) if isinstance(reg, dict) else ({}, False)
+
+    def _registry(self):
+        return self._read()[0]
 
     def _save(self, reg):
         """Atomic write: temp file in the same directory, then os.replace, so a crash never leaves a torn registry."""
@@ -92,7 +113,7 @@ class RunPod:
         }
         # Provisional entry first: until the pod id is known, the reaper must not mistake the new pod for an orphan.
         token = PROVISIONAL + secrets.token_hex(6)
-        self._update(lambda reg: reg.__setitem__(token, {"provisional_name": full_name, "expires_at": time.time() + PROVISIONAL_TTL_S}))
+        await asyncio.to_thread(self._update, lambda reg: reg.__setitem__(token, {"provisional_name": full_name, "expires_at": time.time() + PROVISIONAL_TTL_S}))
         try:
             resp = await self.client.post("/pods", json=body)
             resp.raise_for_status()
@@ -106,9 +127,9 @@ class RunPod:
                 reg.pop(token, None)
                 reg[pod["id"]] = {"expires_at": expires_at, "costPerHr": pod.get("costPerHr")}
 
-            self._update(finalize)
+            await asyncio.to_thread(self._update, finalize)
         except BaseException:
-            self._update(lambda reg: reg.pop(token, None))
+            await asyncio.to_thread(self._update, lambda reg: reg.pop(token, None))
             raise
         return {"id": pod["id"], "name": pod.get("name"), "costPerHr": pod.get("costPerHr"), "expires_in_hours": hours}
 
@@ -119,38 +140,58 @@ class RunPod:
         if not POD_ID_RE.match(str(pod_id)):
             raise ValueError("invalid pod id")
         (await self.client.delete(f"/pods/{pod_id}")).raise_for_status()
-        self._update(lambda reg: reg.pop(pod_id, None))
+        await asyncio.to_thread(self._update, lambda reg: reg.pop(pod_id, None))
 
     def _shielded(self, pod, now):
-        """Under the lock: is this pod tracked by id, or covered by a live provisional create with its name?"""
+        """Under the lock: (is this pod tracked by id or covered by a live provisional create with its name, is any provisional create live)."""
         with self._locked():
             reg = self._registry()
-        return pod["id"] in reg or any(
-            k.startswith(PROVISIONAL) and v.get("provisional_name") == pod["name"] and v.get("expires_at", 0) >= now for k, v in reg.items())
+        live_prov = [v for k, v in reg.items() if k.startswith(PROVISIONAL) and isinstance(v, dict) and (_expiry(v) or 0) >= now]
+        tracked = _expiry(reg.get(pod["id"])) is not None  # a corrupt entry does not shield
+        return tracked or any(_norm(v.get("provisional_name")) == _norm(pod["name"]) for v in live_prov), bool(live_prov)
 
     async def reap(self, now=None):
-        """Delete registered pods past their TTL and any jarvis-* pod RunPod lists that we no longer track."""
+        """Delete registered pods past their TTL and any jarvis-* pod RunPod lists that we no longer track.
+        Fails closed: a corrupt entry for a real pod is repaired with a fresh TTL (not terminated); an unreadable registry disables orphan reaping."""
         now = now or time.time()
-        snapshot = self._registry()
-        deleted = []
+        snapshot, registry_ok = self._read()
+        if not registry_ok:
+            log.error("pod registry %s is unreadable or not an object; skipping orphan reaping this pass", self.state)
+        deleted, names = [], {}
         for pod in await self.list_pods():
+            names[pod["id"]] = pod.get("name")
             tracked = snapshot.get(pod["id"])
-            expired = tracked is not None and tracked["expires_at"] < now  # explicit: expired OR (untracked AND jarvis-named)
-            orphan = tracked is None and (pod["name"] or "").startswith(NAME_PREFIX)
-            if orphan and self._shielded(pod, now):  # a create may have landed after the snapshot; re-check just before deleting
+            if tracked is not None and _expiry(tracked) is None:
+                log.warning("registry entry for pod %s is corrupt; repairing it with a fresh TTL and not terminating now", pod["id"])
                 continue
+            expired = tracked is not None and _expiry(tracked) < now  # explicit: expired OR (untracked AND jarvis-named)
+            orphan = registry_ok and tracked is None and (pod.get("name") or "").startswith(NAME_PREFIX)  # exact: never widen what counts as ours
+            if orphan:  # a create may have landed after the snapshot; re-check just before deleting
+                shielded, any_provisional = await asyncio.to_thread(self._shielded, pod, now)
+                if shielded:
+                    continue
+                if any_provisional:
+                    log.warning("reaping orphan %s (%r) while a create is in flight; if that was the new pod the shield missed", pod["id"], pod["name"])
             if expired or orphan:
                 await self.terminate(pod["id"])
                 deleted.append(pod["id"])
+        if not registry_ok:
+            return deleted  # leave the file as it is for the owner to inspect
         live = {p["id"] for p in await self.list_pods()}
 
-        def prune(reg):  # drop pod entries we saw before listing that are gone, and stale provisional entries; a pod created meanwhile survives
+        def prune(reg):  # drop vanished pods, stale provisional entries; repair corrupt entries of live pods; a pod created meanwhile survives
             for k in list(reg):
+                exp = _expiry(reg[k])
                 if k.startswith(PROVISIONAL):
-                    if reg[k].get("expires_at", 0) < now:
+                    if exp is None or exp < now:
                         del reg[k]
-                elif k not in live and (k in snapshot or reg[k].get("expires_at", 0) < now):
+                elif exp is None:
+                    if k in live:
+                        reg[k] = {"name": str(names.get(k) or "")[:80], "expires_at": now + self.max_ttl_hours * 3600}
+                    else:
+                        del reg[k]
+                elif k not in live and (k in snapshot or exp < now):
                     del reg[k]
 
-        self._update(prune)
+        await asyncio.to_thread(self._update, prune)
         return deleted

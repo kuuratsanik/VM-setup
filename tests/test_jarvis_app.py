@@ -312,7 +312,7 @@ async def test_failed_compute_confirm_stays_retryable():
             return {"ok": True}
 
     hub = Hub(Flaky())
-    pid = hub.queue("runpod_create_pod", {"name": "t"})
+    pid = hub.queue("runpod_create_pod", {"name": "t", "gpu_type": "NVIDIA L4"})
     with pytest.raises(RuntimeError):
         await hub.confirm(pid)
     assert "ok" in await hub.confirm(pid)
@@ -443,7 +443,7 @@ async def test_discard_during_failing_compute_confirm_is_not_resurrected():
             raise RuntimeError("boom")
 
     hub = Hub(Slow())
-    pid = hub.queue("runpod_create_pod", {"name": "t"})
+    pid = hub.queue("runpod_create_pod", {"name": "t", "gpu_type": "NVIDIA L4"})
     task = asyncio.create_task(hub.confirm(pid))
     await asyncio.sleep(0.01)
     assert hub.discard(pid) is True
@@ -555,3 +555,15 @@ def test_pod_name_on_the_confirm_card_is_printable_ascii(tmp_path, monkeypatch):
         login(c)
         pid = c.post("/api/compute/runpod/pods/pod1/terminate", headers=H).json()["pending"]
         assert hub.pending[pid]["args"] == {"pod_id": "pod1", "name": "safename"}
+
+
+def test_chat_proposals_are_validated_when_queued():
+    hub = Hub(FakeCompute())
+    for name, args in [("runpod_create_pod", {"name": "ok", "gpu_type": "NVIDIA L4", "hours": "abc"}),
+                       ("runpod_create_pod", {"name": "Bad Name", "gpu_type": "NVIDIA L4", "hours": 1}),
+                       ("kaggle_run_script", {"slug": "../x", "code": "print(1)"})]:
+        with pytest.raises(ValueError):
+            hub.queue(name, args)
+    assert hub.pending == {}
+    pid = hub.queue("runpod_create_pod", {"name": "ok", "gpu_type": "NVIDIA L4", "hours": "1.5", "extra": 1})
+    assert hub.pending[pid]["args"] == {"name": "ok", "gpu_type": "NVIDIA L4", "hours": 1.5}
