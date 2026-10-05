@@ -44,6 +44,8 @@ bash scripts/cloud-setup.sh
 
 The pins (Terraform, kubectl, Helm, k3d, Playwright) live in `scripts/cloud-setup.sh`, which is idempotent and skips binaries already at the pinned version.
 
+The script warns and continues when a step fails and always exits 0 (so the environment is still cached); `--strict` exits 1 instead, for local verification. The SessionStart hook lists any missing tools on every session start, so a failed install is still visible.
+
 - Keep the pins equal to CI's. To find the Playwright pin, run `pip download --no-deps playwright==<ver>` and look for `"revision": "1194"` in the wheel's `browsers.json`.
 - The trade-off of the one-line wrapper: the cache rebuilds only when the wrapper line or the network setting changes, not when the repo file does, so bump the wrapper with a comment (for example `bash scripts/cloud-setup.sh # pins 2026-10`) when pins change.
 - The cache keeps files, not running processes. So `dockerd` is started by the SessionStart hook (§4.2), not here.
