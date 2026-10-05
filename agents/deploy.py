@@ -1,7 +1,8 @@
 """Deploy agent (self-upgrade): rolls the running copy forward to origin/main after tests pass, with automatic rollback.
 
-Only commits that reached main through a merged PR are deployed, and a commit touching protected paths must have come
-from a PR labelled 'human-approved'. Infrastructure changes (Terraform, Ansible) are never applied here.
+A commit that changes a protected path (other than regular TIER0 runbook/proposal files) must have come from a merged
+PR labelled 'human-approved'. Other commits are deployed without a PR lookup and rely on GitHub branch protection for
+review. Infrastructure changes (Terraform, Ansible) are never applied here.
 """
 import os
 import re
@@ -27,10 +28,24 @@ def git(repo, *args):
     return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
 
 
+def git_raw(repo, *args):
+    """Like git() but without stripping, so NUL-separated output stays intact."""
+    return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=True).stdout
+
+
+def regular_file(repo, sha, path):
+    """True if path is absent at sha (deleted) or a regular file (100644/100755), i.e. not a symlink or submodule."""
+    entry = git_raw(repo, "--literal-pathspecs", "-c", "core.quotePath=false", "ls-tree", "-z", sha, "--", path)
+    return not entry or entry.split(" ", 1)[0] in ("100644", "100755")
+
+
 def approved(repo, sha):
-    """True unless the commit changes a protected, non-TIER0 path (same rule as reviewer.policy_problems); then it must have come from a merged PR labelled human-approved."""
-    files = git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", sha).split()
-    if not any(f.startswith(reviewer.PROTECTED) and not reviewer.is_tier0(f) for f in files):
+    """True unless the commit changes a protected path that is not an exempt TIER0 file (same rule as
+    reviewer.policy_problems, but TIER0 is exempt only as a regular file, never a symlink); then it must have come
+    from a merged PR labelled human-approved. Lists files of every parent for merge commits, NUL-separated and unquoted."""
+    out = git_raw(repo, "-c", "core.quotePath=false", "diff-tree", "-m", "-z", "--no-commit-id", "--name-only", "-r", sha)
+    files = [f for f in out.split("\0") if f]
+    if not any(f.startswith(reviewer.PROTECTED) and not (reviewer.is_tier0(f) and regular_file(repo, sha, f)) for f in files):
         return True
     slug = re.search(r"github\.com[:/](.+?)(?:\.git)?$", git(repo, "remote", "get-url", "origin"))
     if not slug:
