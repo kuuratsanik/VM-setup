@@ -45,7 +45,7 @@ def approved(repo, sha):
     from a merged PR labelled human-approved. Lists files of every parent for merge commits, NUL-separated and unquoted."""
     out = git_raw(repo, "-c", "core.quotePath=false", "diff-tree", "-m", "-z", "--no-commit-id", "--name-only", "-r", sha)
     files = [f for f in out.split("\0") if f]
-    if not any(f.startswith(reviewer.PROTECTED) and not (reviewer.is_tier0(f) and regular_file(repo, sha, f)) for f in files):
+    if not any(reviewer.is_protected(f) and not (reviewer.is_tier0(f) and regular_file(repo, sha, f)) for f in files):
         return True
     slug = re.search(r"github\.com[:/](.+?)(?:\.git)?$", git(repo, "remote", "get-url", "origin"))
     if not slug:
