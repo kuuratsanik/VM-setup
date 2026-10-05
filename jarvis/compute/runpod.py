@@ -44,6 +44,10 @@ class SpendGuard(Exception):
     pass
 
 
+class RegistryCorrupt(Exception):
+    """The pod registry file is unreadable; refusing to overwrite it."""
+
+
 class RunPod:
     def __init__(self, key, max_hourly_usd=1.0, max_ttl_hours=4.0, transport=None, state=STATE):
         self.max_hourly_usd, self.max_ttl_hours, self.state = max_hourly_usd, max_ttl_hours, state
@@ -90,7 +94,9 @@ class RunPod:
     def _update(self, fn):
         """Locked read-modify-write; fn mutates the registry dict in place."""
         with self._locked():
-            reg = self._registry()
+            reg, ok = self._read()
+            if not ok:  # saving {} over a damaged file would turn every other tracked pod into an orphan
+                raise RegistryCorrupt(f"pod registry {self.state} is unreadable; fix or remove it")
             fn(reg)
             self._save(reg)
 
@@ -129,7 +135,10 @@ class RunPod:
 
             await asyncio.to_thread(self._update, finalize)
         except BaseException:
-            await asyncio.to_thread(self._update, lambda reg: reg.pop(token, None))
+            try:
+                await asyncio.to_thread(self._update, lambda reg: reg.pop(token, None))
+            except RegistryCorrupt:
+                log.error("could not remove provisional entry %s: registry is unreadable", token)
             raise
         return {"id": pod["id"], "name": pod.get("name"), "costPerHr": pod.get("costPerHr"), "expires_in_hours": hours}
 
@@ -140,7 +149,10 @@ class RunPod:
         if not POD_ID_RE.match(str(pod_id)):
             raise ValueError("invalid pod id")
         (await self.client.delete(f"/pods/{pod_id}")).raise_for_status()
-        await asyncio.to_thread(self._update, lambda reg: reg.pop(pod_id, None))
+        try:
+            await asyncio.to_thread(self._update, lambda reg: reg.pop(pod_id, None))
+        except RegistryCorrupt:
+            log.warning("pod %s was terminated but the registry is unreadable, so its entry was not removed", pod_id)
 
     def _shielded(self, pod, now):
         """Under the lock: (is this pod tracked by id or covered by a live provisional create with its name, is any provisional create live)."""
@@ -157,6 +169,7 @@ class RunPod:
         snapshot, registry_ok = self._read()
         if not registry_ok:
             log.error("pod registry %s is unreadable or not an object; skipping orphan reaping this pass", self.state)
+        registry_missing = not self.state.exists()
         deleted, names = [], {}
         for pod in await self.list_pods():
             names[pod["id"]] = pod.get("name")
@@ -170,6 +183,8 @@ class RunPod:
                 shielded, any_provisional = await asyncio.to_thread(self._shielded, pod, now)
                 if shielded:
                     continue
+                if registry_missing:
+                    log.warning("pod registry %s is absent but jarvis-* pod %s is about to be reaped as an orphan", self.state, pod["id"])
                 if any_provisional:
                     log.warning("reaping orphan %s (%r) while a create is in flight; if that was the new pod the shield missed", pod["id"], pod["name"])
             if expired or orphan:

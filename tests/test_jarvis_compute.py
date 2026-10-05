@@ -327,3 +327,61 @@ async def test_unreadable_registry_file_disables_orphan_reaping(tmp_path, caplog
     assert "unreadable" in caplog.text
     (tmp_path / "pods.json").unlink()  # a missing file is a healthy empty registry: orphans are reaped
     assert await rp.reap(now=100) == ["o"]
+
+
+@pytest.mark.asyncio
+async def test_update_refuses_to_overwrite_a_corrupt_registry(tmp_path):
+    from jarvis.compute.runpod import RegistryCorrupt
+
+    rp = runpod(lambda r: httpx.Response(200, json={}), tmp_path)
+    (tmp_path / "pods.json").write_text("{not json")
+    with pytest.raises(RegistryCorrupt):
+        rp._update(lambda reg: reg.__setitem__("x", {"expires_at": 1}))
+    assert (tmp_path / "pods.json").read_text() == "{not json"
+
+
+@pytest.mark.asyncio
+async def test_create_fails_before_the_post_when_the_registry_is_corrupt(tmp_path):
+    from jarvis.compute.runpod import RegistryCorrupt
+
+    calls = []
+    rp = runpod(lambda r: calls.append(r.method) or httpx.Response(200, json={"id": "p1", "costPerHr": 0.1}), tmp_path)
+    (tmp_path / "pods.json").write_text("[1]")
+    with pytest.raises(RegistryCorrupt):
+        await rp.create_pod("x", "NVIDIA L4", hours=1)
+    assert calls == [] and (tmp_path / "pods.json").read_text() == "[1]"  # no untracked pod, file untouched
+
+
+@pytest.mark.asyncio
+async def test_create_cleanup_survives_the_registry_breaking_midway(tmp_path):
+    from jarvis.compute.runpod import RegistryCorrupt
+
+    def handler(request):
+        (tmp_path / "pods.json").write_text("garbage")  # corrupted while the POST is in flight
+        return httpx.Response(200, json={"id": "p1", "costPerHr": 0.1})
+
+    with pytest.raises(RegistryCorrupt):  # the original error, not one masked by the cleanup
+        await runpod(handler, tmp_path).create_pod("x", "NVIDIA L4", hours=1)
+    assert (tmp_path / "pods.json").read_text() == "garbage"
+
+
+@pytest.mark.asyncio
+async def test_terminate_still_calls_runpod_when_the_registry_is_corrupt(tmp_path, caplog):
+    import logging
+
+    calls = []
+    rp = runpod(lambda r: calls.append(r.method) or httpx.Response(200, json={}), tmp_path)
+    (tmp_path / "pods.json").write_text("garbage")
+    with caplog.at_level(logging.WARNING):
+        await rp.terminate("p1")
+    assert calls == ["DELETE"] and "registry is unreadable" in caplog.text and (tmp_path / "pods.json").read_text() == "garbage"
+
+
+@pytest.mark.asyncio
+async def test_absent_registry_with_orphans_logs_a_warning(tmp_path, caplog):
+    import logging
+
+    pods, deleted = {"o": "jarvis-orphan"}, []
+    with caplog.at_level(logging.WARNING):
+        assert await runpod(_lister(pods, deleted), tmp_path).reap(now=100) == ["o"]
+    assert "is absent" in caplog.text
