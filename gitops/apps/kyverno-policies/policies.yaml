@@ -6,16 +6,32 @@ metadata:
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   validationFailureAction: Audit
+  # Hygiene policy: fail open so a Kyverno outage never blocks pod creation.
+  failurePolicy: Ignore
   background: true
   rules:
     - name: require-pinned-image-tag
       match: { any: [{ resources: { kinds: [Pod] } }] }
+      exclude: { any: [{ resources: { namespaces: [system-upgrade] } }] }
       validate:
         message: "Images must use a pinned tag, not ':latest'."
         pattern:
           spec:
+            =(initContainers):
+              - image: "!*:latest"
             containers:
               - image: "!*:latest"
+    - name: require-image-tag
+      match: { any: [{ resources: { kinds: [Pod] } }] }
+      exclude: { any: [{ resources: { namespaces: [system-upgrade] } }] }
+      validate:
+        message: "Images must carry an explicit tag or digest (no tag means implicit ':latest')."
+        pattern:
+          spec:
+            =(initContainers):
+              - image: "*:*"
+            containers:
+              - image: "*:*"
 ---
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy

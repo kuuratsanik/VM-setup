@@ -1,4 +1,6 @@
+# Upstream manifests are vendored (v0.20.2) instead of pulled from releases/latest,
+# so every controller change is a reviewed PR. Update crd.yaml and controller.yaml together.
 resources:
-  - https://github.com/rancher/system-upgrade-controller/releases/latest/download/crd.yaml
-  - https://github.com/rancher/system-upgrade-controller/releases/latest/download/system-upgrade-controller.yaml
+  - crd.yaml
+  - controller.yaml
   - plans.yaml

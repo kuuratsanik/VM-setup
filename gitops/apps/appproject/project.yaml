@@ -1,0 +1,46 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  description: Platform apps. Only the Helm repos in use, in-cluster destinations, and the cluster-scoped kinds charts need.
+  sourceRepos:
+    - https://github.com/kuuratsanik/VM-setup
+    - https://github.com/kuuratsanik/VM-setup.git
+    - https://charts.jetstack.io
+    - https://bitnami.github.io/sealed-secrets
+    - https://prometheus-community.github.io/helm-charts
+    - https://kyverno.github.io/kyverno
+    - https://grafana.github.io/helm-charts
+    - https://netdata.github.io/helmchart/
+    - https://charts.k8sgpt.ai
+    # optional apps
+    - https://vmware-tanzu.github.io/helm-charts
+    - https://charts.external-secrets.io
+    - https://argoproj.github.io/argo-helm
+    - https://cloudnative-pg.github.io/charts
+    - https://charts.longhorn.io
+  destinations:
+    - { server: https://kubernetes.default.svc, namespace: cert-manager }
+    - { server: https://kubernetes.default.svc, namespace: kube-system }
+    - { server: https://kubernetes.default.svc, namespace: monitoring }
+    - { server: https://kubernetes.default.svc, namespace: kyverno }
+    - { server: https://kubernetes.default.svc, namespace: logging }
+    - { server: https://kubernetes.default.svc, namespace: netdata }
+    - { server: https://kubernetes.default.svc, namespace: k8sgpt }
+    - { server: https://kubernetes.default.svc, namespace: velero }
+    - { server: https://kubernetes.default.svc, namespace: external-secrets }
+    - { server: https://kubernetes.default.svc, namespace: argo-rollouts }
+    - { server: https://kubernetes.default.svc, namespace: cnpg-system }
+    - { server: https://kubernetes.default.svc, namespace: longhorn-system }
+  clusterResourceWhitelist:
+    - { group: "", kind: Namespace }
+    - { group: apiextensions.k8s.io, kind: CustomResourceDefinition }
+    - { group: rbac.authorization.k8s.io, kind: ClusterRole }
+    - { group: rbac.authorization.k8s.io, kind: ClusterRoleBinding }
+    - { group: admissionregistration.k8s.io, kind: ValidatingWebhookConfiguration }
+    - { group: admissionregistration.k8s.io, kind: MutatingWebhookConfiguration }
+    - { group: scheduling.k8s.io, kind: PriorityClass }

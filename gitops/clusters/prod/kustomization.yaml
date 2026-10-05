@@ -1,5 +1,24 @@
 resources:
+  - ../../apps/appproject
   - ../../apps/cert-manager
   - ../../apps/sealed-secrets
   - ../../apps/system-upgrade-controller
   - ../../apps/ai-readonly
+  - ../../apps/kyverno
+  - ../../apps/kyverno-policies
+
+patches:
+  # Enforce only policies every rendered workload already satisfies (verified by rendering
+  # cert-manager, sealed-secrets, kyverno, SUC: all images are pinned tags).
+  # require-memory-limits stays Audit: cert-manager, sealed-secrets and SUC set no memory limits.
+  - target: { kind: ClusterPolicy, name: disallow-latest-tag }
+    patch: |-
+      - op: replace
+        path: /spec/validationFailureAction
+        value: Enforce
+  # Explicit prod version (equals the base today). Bump the base for dev/hub first; bump this LAST.
+  - target: { kind: Plan }
+    patch: |-
+      - op: replace
+        path: /spec/version
+        value: v1.36.5+k3s1

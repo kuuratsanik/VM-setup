@@ -9,7 +9,10 @@ spec:
   concurrency: 1
   cordon: true
   serviceAccountName: system-upgrade
-  channel: https://update.k3s.io/v1-release/channels/stable
+  # Explicit version, never a channel. Per-cluster override: clusters/<name>/kustomization.yaml (hub/dev follow the base version below; prod pins its own)
+  # To hold prod back: bump this base (dev/hub) first, bump the prod patch last.
+  # SUC derives the image tag from this version (rancher/k3s-upgrade:v1.36.5-k3s1).
+  version: v1.36.5+k3s1
   nodeSelector:
     matchExpressions:
       - { key: node-role.kubernetes.io/control-plane, operator: Exists }
@@ -27,7 +30,10 @@ spec:
   concurrency: 1
   cordon: true
   serviceAccountName: system-upgrade
-  channel: https://update.k3s.io/v1-release/channels/stable
+  # Explicit version, never a channel. Per-cluster override: clusters/<name>/kustomization.yaml (hub/dev follow the base version below; prod pins its own)
+  # To hold prod back: bump this base (dev/hub) first, bump the prod patch last.
+  # SUC derives the image tag from this version (rancher/k3s-upgrade:v1.36.5-k3s1).
+  version: v1.36.5+k3s1
   nodeSelector:
     matchExpressions:
       - { key: node-role.kubernetes.io/control-plane, operator: DoesNotExist }

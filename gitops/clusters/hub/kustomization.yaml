@@ -1,4 +1,5 @@
 resources:
+  - ../../apps/appproject
   - ../../apps/cert-manager
   - ../../apps/sealed-secrets
   - ../../apps/kube-prometheus-stack
@@ -16,3 +17,5 @@ resources:
 #  - ../../apps/argo-rollouts
 #  - ../../apps/cloudnative-pg
 #  - ../../apps/longhorn
+
+# Policies stay in Audit on hub (hub runs the widest app set; not verified for Enforce).
