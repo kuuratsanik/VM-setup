@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# vm-mig-guard: dead-man auto-revert around ONE network addition (plan §7c, T1).
+#
+#   vm-mig-guard arm <phase> <manifest-src>           arm only; prints the unit name U
+#   vm-mig-guard check                                reachability checks; exit 0 only if ALL pass
+#   vm-mig-guard confirm <U>                          .confirmed first, then stop timer, drop marker
+#   vm-mig-guard run <phase> <manifest-src> -- cmd... arm, change, check, confirm (or leave armed)
+#
+# <manifest-src> uses the §7c vocabulary; the token @P@ expands to this sub-step's artifact dir
+# (/root/vm-mig/<phase>/<U>), e.g. "ufw-restore @P@/etc-ufw". Arming failure exits 2, change not run.
+# Failed checks exit 1 and do NOTHING else: the timer fires and reverts.
+set -uo pipefail
+. "$(dirname "$(readlink -f "$0")")/vm-mig-lib.sh"
+ARMED=$VMMIG_STATE/armed
+MANS=$VMMIG_STATE/manifests
+
+die_arm() { log "arming failed: ABORT, no change made ($*)"; echo "arming failed: ABORT, no change made" >&2; exit 2; }
+
+arm() {
+  local phase=$1 src=$2 ts U P MAN n=0
+  [[ $phase =~ ^[A-Za-z0-9]+$ ]] || die_arm "bad phase name '$phase'"
+  [ -r "$src" ] || die_arm "manifest source $src not readable"
+  mkdir -p "$ARMED" "$MANS" || die_arm "cannot create $VMMIG_STATE"
+  ts=$(date -u +%Y%m%dT%H%M%SZ)
+  U=vm-mig-deadman-$phase-$ts
+  # unique unit name: never reuse a manifest, marker or loaded unit
+  while [ -e "$MANS/$U.list" ] || [ -e "$ARMED/$U" ] \
+        || [ -n "$(dm_systemctl list-units --all --no-legend --plain "$U.timer" "$U.service" 2>/dev/null)" ]; do
+    n=$((n+1)); [ $n -gt 50 ] && die_arm "no free unit name"
+    U=vm-mig-deadman-$phase-$ts-$n
+  done
+  P=$VMMIG_ROOT/$phase/$U
+  MAN=$MANS/$U.list
+  mkdir -p "$P" || die_arm "cannot create $P"
+  cp -a "$VMMIG_UFW_DIR" "$P/etc-ufw" || die_arm "cannot save $VMMIG_UFW_DIR"
+  nft list ruleset > "$P/nft.before" || die_arm "cannot save nft ruleset"
+  sed "s#@P@#$P#g" "$src" > "$MAN.tmp" && mv "$MAN.tmp" "$MAN" || die_arm "cannot write manifest"
+  "$VMMIG_REVERT" --validate "$MAN" || { mv "$MAN" "$MAN.refused"; die_arm "manifest refused by vm-mig-revert"; }
+  if ! dm_systemd_run --unit="$U" --on-active="$VMMIG_DELAY" --timer-property=AccuracySec=1s \
+         --setenv=VMMIG_STATE="$VMMIG_STATE" --setenv=VMMIG_UFW_DIR="$VMMIG_UFW_DIR" \
+         --setenv=VMMIG_BUS="$VMMIG_BUS" --setenv=PATH="$PATH" \
+         "$VMMIG_REVERT" "$MAN" >/dev/null 2>&1 \
+     || ! dm_systemctl is-active --quiet "$U.timer"; then
+    dm_systemctl stop "$U.timer" >/dev/null 2>&1
+    mv "$MAN" "$MAN.arm-failed"
+    die_arm "systemd-run or timer check failed for $U"
+  fi
+  # persistent marker; survives a power cut, read by vm-mig-boot-revert.service
+  echo "$MAN" > "$ARMED/$U.tmp" && mv "$ARMED/$U.tmp" "$ARMED/$U" && sync \
+    || { dm_systemctl stop "$U.timer" >/dev/null 2>&1; mv "$MAN" "$MAN.arm-failed"; die_arm "cannot write marker"; }
+  log "$U armed: revert in $VMMIG_DELAY unless confirmed (manifest $MAN)"
+  bus "vm-mig-guard: $U armed ($VMMIG_DELAY dead-man), manifest $MAN"
+  echo "$U"
+}
+
+expect() { # key -> value from the expected-value file (parsed, never sourced)
+  [ -r "$VMMIG_EXPECT" ] || return 1
+  awk -F= -v k="$1" '$1==k{sub(/^[^=]*=/,""); print; f=1} END{exit !f}' "$VMMIG_EXPECT"
+}
+
+check() {
+  local fail=0 ts_ip dev ts_json v n code dns
+  ts_ip=$(expect TS_IP) || { log "check: no TS_IP in $VMMIG_EXPECT"; return 1; }
+  dev=$(expect ROUTE_DEV) || { log "check: no ROUTE_DEV in $VMMIG_EXPECT"; return 1; }
+  ts_json=$(timeout 15 tailscale status --json 2>/dev/null) || ts_json='{}'
+  v=$(jq -r '.Self.Online' <<<"$ts_json" 2>/dev/null)
+  [ "$v" = true ] && log "check PASS tailscale Self.Online=true" || { log "check FAIL Self.Online='$v'"; fail=1; }
+  v=$(jq -r '.BackendState' <<<"$ts_json" 2>/dev/null)
+  [ "$v" = Running ] && log "check PASS BackendState=Running" || { log "check FAIL BackendState='$v'"; fail=1; }
+  n=$(ss -ltnH 2>/dev/null | grep -c "$ts_ip:22 ")
+  [ "$n" = 1 ] && log "check PASS sshd on $ts_ip:22" || { log "check FAIL sshd on $ts_ip:22 count=$n"; fail=1; }
+  dns=$(jq -r '.Self.DNSName // empty' <<<"$ts_json" 2>/dev/null | sed 's/\.$//')
+  code=000
+  # pinned to the tailnet IP: the host cannot resolve its own MagicDNS name (verified 2026-10-05),
+  # and the check must not depend on DNS. HTTPS_PATH must be a served path that answers 2xx/3xx.
+  hp=$(expect HTTPS_PATH) || { log "check FAIL: HTTPS_PATH not set in $VMMIG_EXPECT (no default; re-check per phase)"; return 1; }
+  [ -n "$dns" ] && code=$(curl -sk -m 15 --resolve "$dns:443:$ts_ip" -o /dev/null -w '%{http_code}' "https://$dns$hp" 2>/dev/null)
+  [[ $code =~ ^[23][0-9][0-9]$ ]] && log "check PASS https://$dns$hp -> $code" || { log "check FAIL https://${dns:-?}$hp -> $code"; fail=1; }
+  n=$(ip route get 1.1.1.1 2>/dev/null | grep -c "dev $dev")
+  [ "$n" = 1 ] && log "check PASS route via $dev" || { log "check FAIL route via $dev count=$n"; fail=1; }
+  return $fail
+}
+
+confirm() {
+  local U=$1
+  [ -e "$ARMED/$U" ] || { log "confirm: no marker for $U"; return 1; }
+  exec 8>"$VMMIG_STATE/revert.lock"
+  flock -n 8 || { log "confirm: revert in progress for some manifest (lock held); NOT confirming"; return 1; }
+  if dm_systemctl is-active --quiet "$U.service"; then
+    log "confirm: $U.service is running (the dead-man is reverting); NOT confirming"; return 1
+  fi
+  touch "$ARMED/$U.confirmed" && sync || { log "confirm: cannot write $U.confirmed"; return 1; }
+  dm_systemctl stop "$U.timer" || { log "confirm: stop $U.timer failed; .confirmed keeps the revert a no-op"; return 1; }
+  rm -f "$ARMED/$U" "$ARMED/$U.confirmed"
+  log "$U confirmed and cancelled"
+  bus "vm-mig-guard: $U confirmed (all checks passed), dead-man cancelled"
+}
+
+case ${1:-} in
+  arm) arm "${2:?phase}" "${3:?manifest-src}" ;;
+  check) check ;;
+  confirm) confirm "${2:?unit}" ;;
+  run)
+    phase=${2:?phase}; src=${3:?manifest-src}; shift 3
+    [ "${1:-}" = -- ] && shift
+    [ $# -ge 1 ] || { echo "run: missing change command" >&2; exit 64; }
+    check || { log "pre-check RED before arming: no change made"; echo "pre-check failed: ABORT, no change made" >&2; exit 2; }
+    U=$(arm "$phase" "$src") || exit 2
+    log "$U: running change: $*"
+    "$@"; crc=$?
+    [ $crc -eq 0 ] || log "$U: change exited $crc"
+    if [ $crc -eq 0 ] && check; then confirm "$U"; exit $?; fi
+    log "$U: NOT confirmed; the dead-man will revert in at most $VMMIG_DELAY"
+    exit 1 ;;
+  *) sed -n '2,12p' "$0" >&2; exit 64 ;;
+esac

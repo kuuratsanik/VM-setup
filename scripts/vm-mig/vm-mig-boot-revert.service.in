@@ -1,0 +1,24 @@
+[Unit]
+Description=VM migration: revert unconfirmed dead-man network changes at boot (plan §7c)
+After=local-fs.target libvirtd.service ufw.service snap.docker.dockerd.service
+# Deliberately NO Before=snap.tailscale.tailscaled.service: the plan never changes tailscaled, and a
+# hung revert must never withhold the only remote path (adversary review).
+ConditionDirectoryNotEmpty=/var/lib/vm-mig/armed
+# 3 attempts (each <= 300 s + 60 s pause) fit inside the 1200 s window
+StartLimitIntervalSec=1200
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+TimeoutStartSec=300
+# /usr/bin/timeout here is uutils 0.8.0 and may orphan children on expiry; KillMode=control-group
+# makes systemd kill everything the revert spawned when the attempt ends or times out.
+KillMode=control-group
+ExecStart=/usr/bin/timeout 240 /usr/local/sbin/vm-mig-boot-revert
+# a timeout-killed or failed revert retries within the same boot (revert is idempotent; the marker
+# stays until a revert completes)
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target

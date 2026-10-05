@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# g7-backup: critical set on both physical disks, two formats each (plan §7b, T3). Root only.
+# Prerequisites created in P0a (NOT by this tool): rpool/backup-critical (encrypted, key loaded),
+# /srv/backup-critical/restic and /ext-pool/backups/restic-critical (restic init), and
+# G7_RESTIC_PASSWORD_FILE pointing at the vault-drop password file. Missing prerequisite -> exit 5.
+# G8 red -> exit 75 (WAIT, not a failure). Each source records OK/SKIPPED/FAILED in $D/STATUS.
+#
+# Postgres (optional, from a ZFS clone, never the original): G7_PG_SETS="name|datadir-under-ext-pool|image ..."
+set -uo pipefail
+. "$(dirname "$(readlink -f "$0")")/vm-mig-lib.sh"
+BC=${G7_DATASET:-rpool/backup-critical}
+BCDIR=${G7_DIR:-/srv/backup-critical}
+HDD_REPO=${G7_HDD_REPO:-/ext-pool/backups/restic-critical}
+# G7's own raw-send target. Deliberately NOT under ext-pool/replica (zfs-replicate owns that tree
+# with recv -F), and rpool/backup-critical is NOT added to zfs-replicate SOURCES (lead, T3 review).
+REPLICA=${G7_REPLICA:-ext-pool/g7/backup-critical}
+VW=${G7_VW:-/ext-pool/k8s/pvc-3a9ae25a-53f2-4e22-a84f-64db4fc2689f_vaultwarden_vaultwarden-data}
+N8N=${G7_N8N:-/ext-pool/k8s/pvc-e684503d-7606-45a1-9cf9-71f77142ff3f_n8n_n8n-data}
+UHOME=${G7_HOME:-/home/$VMMIG_USER}
+DATE=$(date +%F)
+
+[ "$(id -u)" = 0 ] || [ -n "${G7_TEST:-}" ] || { echo "run as root" >&2; exit 1; }
+for c in sqlite3 restic zstd fuser lsof pg_restore; do
+  command -v "$c" >/dev/null || { log "prerequisite missing: $c"; exit 5; }
+done
+# G8 WAIT gate (§7) and rpool cap
+if [ -z "${G7_SKIP_G8:-}" ]; then
+  /home/sven-katkosilt/coordination/bin/brake-advise --quiet || { log "G8 WAIT: brake-advise defer"; exit 75; }
+  [ "$(free -g | awk '/Swap/{print ($3<=8)}')" = 1 ] || { log "G8 WAIT: swap > 8 GiB"; exit 75; }
+fi
+cap=$(zpool list -H -o cap rpool | tr -d %); [ "$cap" -le 80 ] || { log "rpool cap $cap% > 80%"; exit 75; }
+zfs list -H "$BC" >/dev/null 2>&1 || { log "prerequisite missing: $BC (P0a)"; exit 5; }
+[ "$(zfs get -H -o value keystatus "$BC")" = available ] || { log "key not loaded for $BC"; exit 5; }
+for r in "$BCDIR/restic" "$HDD_REPO"; do [ -e "$r/config" ] || { log "prerequisite missing: restic repo $r (P0a)"; exit 5; }; done
+[ -r "${G7_RESTIC_PASSWORD_FILE:-}" ] || { log "G7_RESTIC_PASSWORD_FILE not readable"; exit 5; }
+export RESTIC_PASSWORD_FILE=$G7_RESTIC_PASSWORD_FILE
+
+D=$BCDIR/dumps/$DATE
+[ -e "$D" ] && { log "$D exists; refusing to overwrite (move it aside by hand)"; exit 6; }
+mkdir -p "$D" "$BCDIR/tmp"; chmod 700 "$D"
+SCRATCH=(); GITEA_WAS=""; PG_SNAPS=()
+cleanup() { # always: drop our stage/ref copies, restart gitea if we stopped it, drop temp pg snapshots
+  local x
+  for x in "${SCRATCH[@]}"; do rm -rf -- "$x"; done
+  [ "$GITEA_WAS" = active ] && ! systemctl is-active --quiet snap.gitea.web.service && snap start gitea >/dev/null 2>&1
+  for x in "${PG_SNAPS[@]}"; do zfs list -H "$x" >/dev/null 2>&1 && zfs destroy "$x"; done
+}
+trap cleanup EXIT
+st() { echo "$1 $2${3:+ $3}" >> "$D/STATUS"; log "$1 $2${3:+ $3}"; }
+
+sqlite_safe_copy() { # name srcdir dbfile counttables... (R1: fuser/lsof, two copies, checkpoint, count gate)
+  local name=$1 src=$2 db=$3; shift 3
+  local s="$BCDIR/tmp/$name-stage-$$" r="$BCDIR/tmp/$name-ref-$$" t a b
+  [ -e "$src/$db" ] || { st "$name" SKIPPED "no $src/$db"; return 0; }
+  if [ -n "$(fuser "$src/$db"* 2>/dev/null)" ] || [ -n "$(lsof +D "$src" 2>/dev/null)" ]; then
+    st "$name" FAILED "db is held open"; return 3; fi
+  SCRATCH+=("$s" "$r")
+  cp -a "$src" "$s" && cp -a "$src" "$r" || { st "$name" FAILED "copy"; return 4; }
+  for x in "$s" "$r"; do
+    sqlite3 "$x/$db" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null \
+      && [ "$(sqlite3 "$x/$db" 'PRAGMA integrity_check')" = ok ] || { st "$name" FAILED "integrity $x"; return 4; }
+  done
+  for t in "$@"; do
+    a=$(sqlite3 "$s/$db" "SELECT count(*) FROM $t" 2>/dev/null); b=$(sqlite3 "$r/$db" "SELECT count(*) FROM $t" 2>/dev/null)
+    [ -n "$a" ] && [ "$a" = "$b" ] || { st "$name" FAILED "count $t stage=$a ref=$b"; return 4; }
+    echo "$a" > "$D/$name.$t"
+  done
+  sqlite3 "$s/$db" ".backup '$D/$name.sqlite3'" || { st "$name" FAILED ".backup"; return 4; }
+  echo "$s" > "$D/.$name.stage"   # scratch copies live inside the encrypted dataset; the trap removes them
+  st "$name" OK
+}
+
+rc=0
+sqlite_safe_copy vaultwarden "$VW" db.sqlite3 ciphers users attachments || rc=1
+if [ -s "$D/.vaultwarden.stage" ]; then
+  read -r s < "$D/.vaultwarden.stage"
+  tar -C "$s" -cf "$D/vw-files.tar" --ignore-failed-read attachments sends rsa_key.pem rsa_key.pub.pem config.json 2>/dev/null
+  cp "$D/vaultwarden.ciphers" "$D/vw.ciphers"
+fi
+sqlite_safe_copy n8n "$N8N" database.sqlite workflow_entity || rc=1
+rm -f "$D"/.*.stage
+
+# gitea: stopped for the dump, always restarted if it was running
+if snap list gitea >/dev/null 2>&1; then
+  was=$(systemctl is-active snap.gitea.web.service 2>/dev/null); GITEA_WAS=$was
+  snap stop gitea >/dev/null && tar -C /var/snap/gitea/common -cf "$D/gitea-common.tar" . && st gitea OK || { st gitea FAILED; rc=1; }
+  [ "$was" = active ] && { snap start gitea >/dev/null || { st gitea-restart FAILED; rc=1; }; }
+else st gitea SKIPPED "snap not installed"; fi
+
+# Postgres from a clone of a fresh ext-pool snapshot (R3); the clone is ours and is destroyed after
+for set in ${G7_PG_SETS:-}; do
+  IFS='|' read -r name dir image <<<"$set"
+  snap_=ext-pool@g7-pg-$name-$(date +%s); clone=ext-pool/g7-pg-$name; mnt=/var/tmp/vm-mig/g7-pg-$name
+  PG_SNAPS+=("$snap_")
+  if zfs snapshot "$snap_" && zfs clone -o mountpoint="$mnt" "$snap_" "$clone"; then
+    cid=$(docker run -d --rm --network none --name "g7-pg-$name" -v "$mnt/${dir#/ext-pool/}:/var/lib/postgresql/data" "$image")
+    for _ in $(seq 60); do docker exec "$cid" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 2; done
+    ok=1
+    for db in $(docker exec "$cid" psql -U postgres -Atc "SELECT datname FROM pg_database WHERE NOT datistemplate"); do
+      docker exec "$cid" pg_dump -U postgres -Fc "$db" > "$D/pg-$name-$db.dump" || ok=0
+    done
+    docker stop "$cid" >/dev/null; zfs destroy "$clone"; zfs destroy "$snap_"
+    [ $ok = 1 ] && st "pg-$name" OK || { st "pg-$name" FAILED; rc=1; }
+  else st "pg-$name" FAILED "snapshot/clone"; rc=1; fi
+done
+[ -z "${G7_PG_SETS:-}" ] && st postgres SKIPPED "G7_PG_SETS not set (fleet down; needs the pinned images)"
+
+tar --zstd -C "$UHOME" -cf "$D/coordination.tar.zst" coordination && st coordination OK || { st coordination FAILED; rc=1; }
+(cd "$D" && sha256sum -- * > SHA256SUMS) || rc=1
+
+snapname=$BC@g7-$DATE
+zfs snapshot "$snapname" || rc=1
+parent=${REPLICA%/*}
+zfs list -H "$parent" >/dev/null 2>&1 || zfs create -o mountpoint=none -o canmount=off "$parent" || rc=1
+prev=$(zfs list -H -t snapshot -o name -s creation "$REPLICA" 2>/dev/null | grep '@g7-' | tail -1 | sed 's/.*@/@/')
+if [ -n "$prev" ]; then zfs send -w -i "$prev" "$snapname" | zfs recv -u "$REPLICA" || rc=1
+else zfs send -w "$snapname" | zfs recv -u -o mountpoint=none -o com.sun:auto-snapshot=false "$REPLICA" || rc=1; fi
+zfs set com.sun:auto-snapshot=false "$REPLICA" || rc=1   # §7b: no zfs-auto-snapshot on the target (breaks -i chains)
+nice -n 10 restic backup -q --repo "$BCDIR/restic" "$D" || rc=1
+nice -n 10 restic backup -q --repo "$HDD_REPO" "$D" || rc=1
+log "done rc=$rc; $(du -sh "$D" | cut -f1) in $D"
+bus "g7-backup $DATE rc=$rc: $(tr '\n' ';' < "$D/STATUS")"
+exit $rc

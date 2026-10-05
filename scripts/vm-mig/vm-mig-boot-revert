@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# vm-mig-boot-revert: run by vm-mig-boot-revert.service at boot (plan §7c, power cut in the window).
+# For each marker <U> in $VMMIG_STATE/armed:
+#   <U>.confirmed exists -> remove both files, never revert a confirmed change;
+#   otherwise            -> vm-mig-revert "$(cat marker)" (which removes the marker on success).
+# No markers -> no-op.
+set -uo pipefail
+. "$(dirname "$(readlink -f "$0")")/vm-mig-lib.sh"
+ARMED=$VMMIG_STATE/armed
+shopt -s nullglob
+rc=0; n=0
+for m in "$ARMED"/*; do
+  case $m in *.confirmed|*.tmp) continue ;; esac
+  [ -f "$m" ] || continue
+  U=$(basename "$m"); n=$((n+1))
+  if [ -e "$ARMED/$U.confirmed" ]; then
+    rm -f "$m" "$ARMED/$U.confirmed"
+    log "$U: confirmed before the reboot; markers removed, NOT reverted"
+    continue
+  fi
+  man=$(head -n1 "$m")
+  log "$U: armed and unconfirmed at boot; reverting $man"
+  "$VMMIG_REVERT" "$man" || { rc=1; log "$U: revert failed; marker kept"; }
+done
+for c in "$ARMED"/*.confirmed; do   # stale .confirmed whose marker is already gone
+  [ -e "${c%.confirmed}" ] || { rm -f "$c"; log "removed stale $(basename "$c")"; }
+done
+[ $n -eq 0 ] && log "no armed markers; nothing to do"
+exit $rc
