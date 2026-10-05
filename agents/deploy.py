@@ -28,9 +28,9 @@ def git(repo, *args):
 
 
 def approved(repo, sha):
-    """True if the commit is outside protected paths, or came from a merged PR labelled human-approved."""
+    """True unless the commit changes a protected, non-TIER0 path (same rule as reviewer.policy_problems); then it must have come from a merged PR labelled human-approved."""
     files = git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", sha).split()
-    if not any(f.startswith(reviewer.PROTECTED) for f in files):
+    if not any(f.startswith(reviewer.PROTECTED) and not reviewer.is_tier0(f) for f in files):
         return True
     slug = re.search(r"github\.com[:/](.+?)(?:\.git)?$", git(repo, "remote", "get-url", "origin"))
     if not slug:
