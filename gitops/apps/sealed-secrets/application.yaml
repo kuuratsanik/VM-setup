@@ -4,7 +4,7 @@ metadata:
   name: sealed-secrets
   namespace: argocd
 spec:
-  project: default
+  project: platform
   source:
     repoURL: https://bitnami.github.io/sealed-secrets
     chart: sealed-secrets

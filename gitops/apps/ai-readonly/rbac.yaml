@@ -5,6 +5,8 @@ metadata:
   name: ai-readonly
   namespace: kube-system
 ---
+# LEGACY: static non-expiring token, still read by scripts/ai_kubeconfig.py and agents/mcp_servers.yaml.
+# Remove once ai_kubeconfig.py moves to bound tokens (`kubectl -n kube-system create token ai-readonly --duration=1h`).
 apiVersion: v1
 kind: Secret
 metadata:
@@ -25,7 +27,10 @@ rules:
   - apiGroups: [metrics.k8s.io]
     resources: ["*"]
     verbs: [get, list]
-  - apiGroups: [argoproj.io, core.k8sgpt.ai, monitoring.coreos.com, wgpolicyk8s.io, kyverno.io, upgrade.cattle.io, cert-manager.io]
+  - apiGroups: [argoproj.io]
+    resources: [applications, appprojects]
+    verbs: [get, list, watch]
+  - apiGroups: [core.k8sgpt.ai, monitoring.coreos.com, wgpolicyk8s.io, kyverno.io, upgrade.cattle.io, cert-manager.io]
     resources: ["*"]
     verbs: [get, list, watch]
 ---

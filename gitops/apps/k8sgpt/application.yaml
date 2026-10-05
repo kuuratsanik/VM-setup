@@ -4,7 +4,7 @@ metadata:
   name: k8sgpt-operator
   namespace: argocd
 spec:
-  project: default
+  project: platform
   source:
     repoURL: https://charts.k8sgpt.ai
     chart: k8sgpt-operator
