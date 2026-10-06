@@ -81,6 +81,7 @@ def test_state_changing_actions_need_explicit_confirmation(client):
 
 def test_provider_key_endpoint_rejects_bad_input_without_staging(client, tmp_path, monkeypatch):
     from jarvis import providers
+    monkeypatch.setattr(providers, "STATE_DIR", tmp_path)
     monkeypatch.setattr(providers, "CONFIGURED_FILE", tmp_path / "configured-secrets.json")
     login(client)
     assert client.post("/api/providers/nope/key", headers=H, json={"values": {}}).status_code == 404
@@ -673,4 +674,5 @@ def test_normalize_origin():
 
     assert normalize_origin("https://Jarvis.Example:443/") == normalize_origin("https://jarvis.example") == "https://jarvis.example"
     assert normalize_origin("http://a.test:80") == "http://a.test" and normalize_origin("http://a.test:8080/") == "http://a.test:8080"
-    assert normalize_origin("") == "" and normalize_origin("null") == "null" and normalize_origin("https://x:bad") == "https://x:bad"
+    assert normalize_origin("https://Bücher.example/") == normalize_origin("https://xn--bcher-kva.example") == "https://xn--bcher-kva.example"
+    assert normalize_origin("")  == "" and normalize_origin("null") == "null" and normalize_origin("https://x:bad") == "https://x:bad"

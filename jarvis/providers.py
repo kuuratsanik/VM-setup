@@ -124,7 +124,7 @@ def stage(values):
     tmp.replace(path)
 
 
-def configured_providers(env_file=Path("/etc/vmsetup/jarvis.env")):
+def configured_providers():
     """Which providers already have a value in the environment (names only, never values)."""
     names = {name for name in PROVIDERS_FIELDS if os.environ.get(name)}
     try:  # the root applier lists (in a root-owned file) the variable names it wrote (never values); Jarvis itself only gets RunPod/Kaggle in its env

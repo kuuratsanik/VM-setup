@@ -68,6 +68,10 @@ def normalize_origin(value):
     if port == (443 if parts.scheme.lower() == "https" else 80):
         port = None
     host = parts.hostname.lower()
+    try:  # a Unicode host matches the browser's punycode Origin
+        host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        pass
     if ":" in host:
         host = f"[{host}]"
     return f"{parts.scheme.lower()}://{host}" + (f":{port}" if port else "")
