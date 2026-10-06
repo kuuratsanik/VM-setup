@@ -6,6 +6,7 @@ import subprocess
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
@@ -49,6 +50,29 @@ class KeyIn(BaseModel):
     values: dict[str, str]
 
 
+STT_LIMIT = 25 * 1024 * 1024
+
+
+def normalize_origin(value):
+    """scheme://host[:port] with lowercase scheme and host, default ports and trailing slash dropped; '' if empty."""
+    value = (value or "").strip()
+    if not value:
+        return ""
+    try:
+        parts = urlsplit(value)
+        port = parts.port
+    except ValueError:
+        return value.lower()
+    if not parts.scheme or not parts.hostname:
+        return value.lower()
+    if port == (443 if parts.scheme.lower() == "https" else 80):
+        port = None
+    host = parts.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{parts.scheme.lower()}://{host}" + (f":{port}" if port else "")
+
+
 def create_app(compute=None, hub=None, start_tools=True):
     compute = compute or Compute()
     hub = hub or Hub(compute)
@@ -69,13 +93,25 @@ def create_app(compute=None, hub=None, start_tools=True):
         raise RuntimeError("JARVIS_SESSION_SECRET is not set")
     app.add_middleware(SessionMiddleware, secret_key=secret, session_cookie="jarvis", max_age=8 * 3600, same_site="strict", https_only=os.environ.get("JARVIS_HTTPS") == "1")
     chat = Chat(hub)
+    public_origin = normalize_origin(os.environ.get("JARVIS_PUBLIC_ORIGIN", ""))
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
         if request.method in ("POST", "PUT", "PATCH", "DELETE"):
             origin = request.headers.get("origin")
-            if request.headers.get("x-requested-with") != "jarvis" or (origin and origin.split("://", 1)[-1] != request.headers.get("host")):
+            if public_origin:  # behind a TLS proxy the Host header is the upstream's, so pin the exact public origin instead
+                bad_origin = bool(origin) and normalize_origin(origin) != public_origin
+            else:
+                bad_origin = bool(origin) and origin.split("://", 1)[-1] != request.headers.get("host")
+            if request.headers.get("x-requested-with") != "jarvis" or bad_origin:
                 return JSONResponse({"detail": "blocked"}, status_code=403)
+        if request.method == "POST" and request.url.path == "/api/stt":
+            # Refuse before routing: the multipart body is spooled to disk before any handler or auth dependency runs.
+            declared = request.headers.get("content-length", "")
+            if "transfer-encoding" in request.headers or not declared.isdigit():
+                return JSONResponse({"detail": "Content-Length required"}, status_code=411)
+            if int(declared) > STT_LIMIT + 64 * 1024:  # multipart framing adds a little to the file itself
+                return JSONResponse({"detail": "audio too large"}, status_code=413)
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = CSP
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -210,9 +246,12 @@ def create_app(compute=None, hub=None, start_tools=True):
 
     @app.post("/api/stt")
     async def stt(file: UploadFile = File(...), user: str = Depends(owner)):
-        data = await file.read()
-        if len(data) > 25 * 1024 * 1024:
-            raise HTTPException(413, "audio too large")
+        limit = STT_LIMIT  # the middleware already bounded Content-Length; this still bounds the in-memory copy
+        data = b""
+        while chunk := await file.read(1024 * 1024):
+            data += chunk
+            if len(data) > limit:
+                raise HTTPException(413, "audio too large")
         resp = await gateway("/v1/audio/transcriptions", files={"file": (file.filename or "audio.webm", data)}, data={"model": "stt"})
         return {"text": resp.json().get("text", "")}
 

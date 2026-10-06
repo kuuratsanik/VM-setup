@@ -45,3 +45,59 @@ def test_garbage_staged_file_is_discarded(env):
     with pytest.raises(SystemExit):
         ap.main()
     assert not staged.exists() and "LITELLM_KEY=keepme" in secrets.read_text()
+
+
+def _marker_env(env, tmp_path, monkeypatch, owner_uid=0, mode=0o755):
+    import os
+    import types
+
+    root_dir = tmp_path / "etc"
+    root_dir.mkdir()
+    marker = root_dir / "jarvis-configured.json"
+    monkeypatch.setattr(ap, "MARKER", marker)
+    real = type(root_dir).stat
+
+    def fake_stat(self, *a, **k):
+        st = real(self, *a, **k)
+        if self == root_dir:
+            return types.SimpleNamespace(st_uid=owner_uid, st_mode=0o040000 | mode)
+        return st
+
+    monkeypatch.setattr(type(root_dir), "stat", fake_stat)
+    return root_dir, marker
+
+
+def test_marker_lists_names_only(env, tmp_path, monkeypatch):
+    staged, secrets, jenv = env
+    root_dir, marker = _marker_env(env, tmp_path, monkeypatch)
+    staged.write_text(json.dumps({"RUNPOD_API_KEY": "rpa_abcdefgh1234"}))
+    ap.main()
+    assert json.loads(marker.read_text()) == ["OPENAI_API_KEY", "RUNPOD_API_KEY"]
+    assert "rpa_abcdefgh1234" not in marker.read_text() and "old" not in marker.read_text()
+
+
+def test_marker_never_follows_a_planted_symlink(env, tmp_path, monkeypatch):
+    staged, secrets, jenv = env
+    root_dir, marker = _marker_env(env, tmp_path, monkeypatch)
+    victim = tmp_path / "victim"
+    victim.write_text("root-owned content")
+    victim.chmod(0o600)
+    (root_dir / "jarvis-configured.json.tmp").symlink_to(victim)
+    marker.symlink_to(victim)
+    ap.write_marker([secrets])
+    assert victim.read_text() == "root-owned content" and (victim.stat().st_mode & 0o777) == 0o600
+    assert not marker.is_symlink() and json.loads(marker.read_text()) == ["OPENAI_API_KEY"]
+
+
+def test_marker_refuses_a_parent_not_owned_by_root_or_writable(env, tmp_path, monkeypatch):
+    staged, secrets, jenv = env
+    for uid, mode in ((1000, 0o755), (0, 0o775), (0, 0o757)):
+        sub = tmp_path / f"{uid}-{mode}"
+        sub.mkdir()
+        root_dir, marker = _marker_env(env, sub, monkeypatch, uid, mode)
+        with pytest.raises(RuntimeError):
+            ap.write_marker([secrets])
+        assert not marker.exists()
+    staged.write_text(json.dumps({"OPENAI_API_KEY": "sk-newvalue12345678"}))
+    ap.main()  # a refused marker must not block applying the key
+    assert "OPENAI_API_KEY=sk-newvalue12345678" in secrets.read_text()

@@ -84,6 +84,8 @@ class Hub:
         return bool(route and route[0] == "infra" and route[2] in runtime.MUTATING)
 
     async def execute(self, name, args, confirmed=False):
+        if name in LOCAL_TOOLS and LOCAL_TOOLS[name][2] and not confirmed:
+            raise PermissionError("this action needs the owner's confirmation")
         if confirmed and name in REST_ONLY:
             return json.dumps(await self.compute.run(name, args))[:4000]
         if name in LOCAL_TOOLS:

@@ -108,6 +108,10 @@ async def validate(provider, values, transport=None, runner=subprocess.run):
     return await _check(provider, values, transport)
 
 
+CONFIGURED_FILE = Path(os.environ.get("JARVIS_CONFIGURED_FILE", "/etc/vmsetup/jarvis-configured.json"))
+PROVIDERS_FIELDS = {name for spec in PROVIDERS.values() for name in spec["fields"]}
+
+
 def stage(values):
     """Hand validated values to the root applier (jarvis/apply_secrets.py) through a 0600 file the path unit watches."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -122,7 +126,10 @@ def stage(values):
 
 def configured_providers(env_file=Path("/etc/vmsetup/jarvis.env")):
     """Which providers already have a value in the environment (names only, never values)."""
-    present = {}
-    for pid, spec in PROVIDERS.items():
-        present[pid] = all(os.environ.get(name) for name in spec["fields"])
-    return present
+    names = {name for name in PROVIDERS_FIELDS if os.environ.get(name)}
+    try:  # the root applier lists (in a root-owned file) the variable names it wrote (never values); Jarvis itself only gets RunPod/Kaggle in its env
+        marked = json.loads(CONFIGURED_FILE.read_text())
+        names |= {n for n in marked if isinstance(n, str)}
+    except (OSError, ValueError, TypeError):
+        pass
+    return {pid: all(name in names for name in spec["fields"]) for pid, spec in PROVIDERS.items()}

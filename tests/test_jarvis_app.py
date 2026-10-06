@@ -81,7 +81,7 @@ def test_state_changing_actions_need_explicit_confirmation(client):
 
 def test_provider_key_endpoint_rejects_bad_input_without_staging(client, tmp_path, monkeypatch):
     from jarvis import providers
-    monkeypatch.setattr(providers, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(providers, "CONFIGURED_FILE", tmp_path / "configured-secrets.json")
     login(client)
     assert client.post("/api/providers/nope/key", headers=H, json={"values": {}}).status_code == 404
     assert client.post("/api/providers/openai/key", headers=H, json={"values": {"OPENAI_API_KEY": "bad key\nLITELLM_KEY=x"}}).status_code == 400
@@ -567,3 +567,110 @@ def test_chat_proposals_are_validated_when_queued():
     assert hub.pending == {}
     pid = hub.queue("runpod_create_pod", {"name": "ok", "gpu_type": "NVIDIA L4", "hours": "1.5", "extra": 1})
     assert hub.pending[pid]["args"] == {"name": "ok", "gpu_type": "NVIDIA L4", "hours": 1.5}
+
+
+def test_hub_execute_refuses_confirm_required_tools_unless_confirmed():
+    import asyncio
+
+    from jarvis.chat import LOCAL_TOOLS
+
+    hub = Hub(FakeCompute())
+    gated = [n for n, spec in LOCAL_TOOLS.items() if spec[2]]
+    assert gated
+    for name in gated:
+        with pytest.raises(PermissionError):
+            asyncio.run(hub.execute(name, {}))
+        with pytest.raises(PermissionError):
+            asyncio.run(hub.execute(name, {}, confirmed=False))
+    assert hub.compute.ran == []
+    assert asyncio.run(hub.execute("runpod_list_pods", {})) == '{"ok": true}'  # read-only tools still run unconfirmed
+    asyncio.run(hub.execute("runpod_create_pod", {"name": "x"}, confirmed=True))
+    assert [n for n, _ in hub.compute.ran] == ["runpod_list_pods", "runpod_create_pod"]
+
+
+def test_public_origin_pins_the_exact_origin(tmp_path, monkeypatch):
+    monkeypatch.setattr(auth, "STATE_DIR", tmp_path)
+    monkeypatch.setenv("JARVIS_SESSION_SECRET", "test-secret-test-secret")
+    monkeypatch.setenv("JARVIS_PUBLIC_ORIGIN", "https://Jarvis.Example:443/")
+    auth._attempts.clear()
+    auth.set_password("owner", "correct horse battery")
+    compute = FakeCompute()
+    body = {"username": "owner", "password": "correct horse battery"}
+    with TestClient(create_app(compute=compute, hub=Hub(compute), start_tools=False)) as c:
+        # the proxy rewrites Host (nginx $proxy_host), so only the configured origin may pass
+        assert c.post("/api/login", headers={**H, "Origin": "https://jarvis.example", "Host": "127.0.0.1:8080"}, json=body).status_code == 200
+        assert c.post("/api/login", headers={**H, "Origin": "HTTPS://jarvis.example:443"}, json=body).status_code == 200
+        for bad in ("http://jarvis.example", "https://jarvis.example:8443", "https://jarvis.example.evil.test", "https://evil.example", "http://127.0.0.1:8080"):
+            assert c.post("/api/login", headers={**H, "Origin": bad}, json=body).status_code == 403, bad
+
+
+def test_origin_falls_back_to_host_without_public_origin(client, monkeypatch):
+    auth.set_password("owner", "correct horse battery")
+    body = {"username": "owner", "password": "correct horse battery"}
+    assert client.post("/api/login", headers={**H, "Origin": "http://testserver"}, json=body).status_code == 200
+
+
+def test_stt_rejects_oversized_audio_by_header_and_by_body(client, monkeypatch):
+    login(client)
+    big = b"x" * (25 * 1024 * 1024 + 1)
+    r = client.post("/api/stt", headers=H, files={"file": ("a.webm", big)})
+    assert r.status_code == 413
+    r = client.post("/api/stt", headers={**H, "Content-Length": str(10**9)}, files={"file": ("a.webm", b"x")})
+    assert r.status_code == 413  # declared size is refused before routing, so nothing is spooled
+    r = client.post("/api/stt", headers=H, content=(b"x" * 10 for _ in range(2)))  # chunked: no Content-Length
+    assert r.status_code == 411
+
+
+def test_stt_size_guard_runs_before_login(client):
+    assert client.post("/api/stt", headers={**H, "Content-Length": str(10**9)}, content=b"x").status_code == 413
+
+
+def test_stt_within_limit_reaches_the_gateway(client, monkeypatch):
+    import types
+
+    import jarvis.app as appmod
+
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, path, files=None, **kw):
+            seen["len"] = len(files["file"][1])
+            return types.SimpleNamespace(status_code=200, json=lambda: {"text": "hi"})
+
+    monkeypatch.setattr(appmod.httpx, "AsyncClient", FakeClient)
+    login(client)
+    r = client.post("/api/stt", headers=H, files={"file": ("a.webm", b"y" * 3_000_000)})
+    assert r.status_code == 200 and r.json() == {"text": "hi"} and seen["len"] == 3_000_000
+
+
+def test_providers_configured_from_the_applier_marker(tmp_path, monkeypatch):
+    from jarvis import providers
+
+    for name in providers.PROVIDERS_FIELDS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(providers, "CONFIGURED_FILE", tmp_path / "configured-secrets.json")
+    assert not any(providers.configured_providers().values())
+    (tmp_path / "configured-secrets.json").write_text(json.dumps(["OPENAI_API_KEY", "KAGGLE_API_TOKEN"]))
+    got = providers.configured_providers()
+    assert got["openai"] and not got["kaggle"] and not got["anthropic"]  # kaggle needs both fields
+    monkeypatch.setenv("KAGGLE_USERNAME", "me")
+    assert providers.configured_providers()["kaggle"]
+    (tmp_path / "configured-secrets.json").write_text("garbage")
+    assert providers.configured_providers()["kaggle"] is False
+
+
+def test_normalize_origin():
+    from jarvis.app import normalize_origin
+
+    assert normalize_origin("https://Jarvis.Example:443/") == normalize_origin("https://jarvis.example") == "https://jarvis.example"
+    assert normalize_origin("http://a.test:80") == "http://a.test" and normalize_origin("http://a.test:8080/") == "http://a.test:8080"
+    assert normalize_origin("") == "" and normalize_origin("null") == "null" and normalize_origin("https://x:bad") == "https://x:bad"
