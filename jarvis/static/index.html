@@ -11,40 +11,45 @@
     <h1>Jarvis</h1>
     <p id="login-note" class="muted"></p>
     <form id="login-form">
+      <label for="u" class="sr-only">Username</label>
       <input id="u" placeholder="username" autocomplete="username" required>
+      <label for="p" class="sr-only">Password</label>
       <input id="p" type="password" placeholder="password" autocomplete="current-password" required>
+      <label for="c" class="sr-only">Authenticator code (if enabled)</label>
       <input id="c" placeholder="authenticator code (if enabled)" inputmode="numeric" autocomplete="one-time-code">
       <button>Sign in</button>
     </form>
-    <p id="login-err" class="err"></p>
+    <p id="login-err" class="err" role="alert"></p>
   </div>
 
   <div id="app" class="hidden">
     <header>
       <strong>Jarvis</strong>
-      <nav id="tabs"></nav>
-      <span id="paused" class="badge bad hidden">agents paused</span>
+      <nav aria-label="Main"><div id="tabs" role="tablist" aria-label="Sections"></div></nav>
+      <span id="paused" class="badge bad hidden" role="status">agents paused</span>
       <button id="logout" class="link">Sign out</button>
     </header>
     <main>
-      <section id="tab-overview"></section>
-      <section id="tab-chat" class="hidden">
-        <div id="log"></div>
+      <section id="tab-overview" role="tabpanel" aria-labelledby="tabbtn-overview" tabindex="0"></section>
+      <section id="tab-chat" role="tabpanel" aria-labelledby="tabbtn-chat" class="hidden">
+        <div id="log" role="log" aria-live="polite" aria-label="Conversation"></div>
         <form id="chat-form">
+          <label for="model" class="sr-only">Model</label>
           <select id="model"></select>
           <label><input type="checkbox" id="use-tools" checked> tools</label>
           <label><input type="checkbox" id="speak"> speak replies</label>
           <label><input type="checkbox" id="server-voice"> server voice</label>
-          <button type="button" id="mic">Mic</button>
+          <button type="button" id="mic" aria-pressed="false">Mic</button>
           <button type="button" id="img">Image</button>
+          <label for="msg" class="sr-only">Message to Jarvis</label>
           <input id="msg" placeholder="Ask Jarvis (never paste keys here; use Setup)" autocomplete="off">
           <button>Send</button>
         </form>
       </section>
-      <section id="tab-autonomy" class="hidden"></section>
-      <section id="tab-compute" class="hidden"></section>
-      <section id="tab-setup" class="hidden"></section>
-      <section id="tab-incidents" class="hidden"></section>
+      <section id="tab-autonomy" role="tabpanel" aria-labelledby="tabbtn-autonomy" class="hidden"></section>
+      <section id="tab-compute" role="tabpanel" aria-labelledby="tabbtn-compute" class="hidden"></section>
+      <section id="tab-setup" role="tabpanel" aria-labelledby="tabbtn-setup" class="hidden"></section>
+      <section id="tab-incidents" role="tabpanel" aria-labelledby="tabbtn-incidents" tabindex="0" class="hidden"></section>
     </main>
   </div>
   <script src="/static/app.js"></script>

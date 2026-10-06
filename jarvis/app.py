@@ -1,15 +1,19 @@
 """Jarvis web dashboard: login, status, chat with tools, voice and image, provider setup, and GPU compute."""
+import asyncio
 import os
+import re
 import subprocess
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -20,7 +24,8 @@ from jarvis import auth, providers, status  # noqa: E402
 import approvals  # noqa: E402
 from policy import Policy  # noqa: E402
 from jarvis.chat import ActionInProgress, Chat, Hub, history_has_secret  # noqa: E402
-from jarvis.compute.runpod import GPUS  # noqa: E402
+from jarvis.compute.models import KaggleIn, PodIn  # noqa: E402
+from jarvis.compute.runpod import GPUS, POD_ID_RE  # noqa: E402
 from jarvis.compute.service import Compute, NotConfigured  # noqa: E402
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -45,16 +50,31 @@ class KeyIn(BaseModel):
     values: dict[str, str]
 
 
-class PodIn(BaseModel):
-    name: str
-    gpu_type: str
-    hours: float = 2.0
+STT_LIMIT = 25 * 1024 * 1024
 
 
-class KaggleIn(BaseModel):
-    slug: str
-    code: str = Field(max_length=200_000)
-    gpu: bool = True
+def normalize_origin(value):
+    """scheme://host[:port] with lowercase scheme and host, default ports and trailing slash dropped; '' if empty."""
+    value = (value or "").strip()
+    if not value:
+        return ""
+    try:
+        parts = urlsplit(value)
+        port = parts.port
+    except ValueError:
+        return value.lower()
+    if not parts.scheme or not parts.hostname:
+        return value.lower()
+    if port == (443 if parts.scheme.lower() == "https" else 80):
+        port = None
+    host = parts.hostname.lower()
+    try:  # a Unicode host matches the browser's punycode Origin
+        host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        pass
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{parts.scheme.lower()}://{host}" + (f":{port}" if port else "")
 
 
 def create_app(compute=None, hub=None, start_tools=True):
@@ -77,13 +97,25 @@ def create_app(compute=None, hub=None, start_tools=True):
         raise RuntimeError("JARVIS_SESSION_SECRET is not set")
     app.add_middleware(SessionMiddleware, secret_key=secret, session_cookie="jarvis", max_age=8 * 3600, same_site="strict", https_only=os.environ.get("JARVIS_HTTPS") == "1")
     chat = Chat(hub)
+    public_origin = normalize_origin(os.environ.get("JARVIS_PUBLIC_ORIGIN", ""))
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
         if request.method in ("POST", "PUT", "PATCH", "DELETE"):
             origin = request.headers.get("origin")
-            if request.headers.get("x-requested-with") != "jarvis" or (origin and origin.split("://", 1)[-1] != request.headers.get("host")):
+            if public_origin:  # behind a TLS proxy the Host header is the upstream's, so pin the exact public origin instead
+                bad_origin = bool(origin) and normalize_origin(origin) != public_origin
+            else:
+                bad_origin = bool(origin) and origin.split("://", 1)[-1] != request.headers.get("host")
+            if request.headers.get("x-requested-with") != "jarvis" or bad_origin:
                 return JSONResponse({"detail": "blocked"}, status_code=403)
+        if request.method == "POST" and request.url.path == "/api/stt":
+            # Refuse before routing: the multipart body is spooled to disk before any handler or auth dependency runs.
+            declared = request.headers.get("content-length", "")
+            if "transfer-encoding" in request.headers or not declared.isdigit():
+                return JSONResponse({"detail": "Content-Length required"}, status_code=411)
+            if int(declared) > STT_LIMIT + 64 * 1024:  # multipart framing adds a little to the file itself
+                return JSONResponse({"detail": "audio too large"}, status_code=413)
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = CSP
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -108,14 +140,27 @@ def create_app(compute=None, hub=None, start_tools=True):
     async def auth_state(request: Request):
         return {"configured": auth.configured(), "logged_in": bool(session_user(request)), "totp": auth.totp_enabled()}
 
+    # One per app; state is guarded by auth._lock (single-process service). Saturation answers 429 for everyone,
+    # including the owner: a token bucket or per-client slot would turn the owner away just the same, and this is
+    # already strictly better than hashing inline on the event loop.
+    login_slots = asyncio.Semaphore(4)
+
     @app.post("/api/login")
     async def login(body: Login, request: Request):
         if not auth.configured():
             raise HTTPException(503, "no account yet: run `python -m jarvis.manage set-password` on the host")
-        ip = request.client.host if request.client else "?"
-        if auth.locked(ip):
-            raise HTTPException(429, "too many attempts; try again later")
-        if not auth.verify(ip, body.username, body.password, body.code):
+        ip = auth.client_ip(request)
+        wait = auth.retry_after(ip)
+        if wait and not auth.totp_enabled():
+            raise HTTPException(429, "too many attempts; try again later", headers={"Retry-After": str(wait)})
+        if login_slots.locked():  # all hashing slots busy: refuse instantly instead of queueing work for an attacker
+            raise HTTPException(429, "too many attempts; try again later", headers={"Retry-After": "1"})
+        async with login_slots:  # argon2 is ~100 ms of CPU: keep it off the event loop
+            ok = await run_in_threadpool(auth.verify, ip, body.username, body.password, body.code)
+        if not ok:
+            if wait:  # locked + TOTP: a failed bypass is always 429, whether password or code was wrong
+                raise HTTPException(429, "too many attempts; try again later", headers={"Retry-After": str(wait)})
+            await asyncio.sleep(auth.tarpit_delay())  # global failure tarpit; correct logins are never delayed
             raise HTTPException(401, "invalid credentials")
         request.session.clear()
         request.session["user"] = body.username
@@ -185,6 +230,10 @@ def create_app(compute=None, hub=None, start_tools=True):
             raise HTTPException(404, "unknown or expired action")
         except ActionInProgress:
             raise HTTPException(409, "that action is already being confirmed")
+        except httpx.HTTPStatusError as exc:  # the provider refused: relay only its status, never its body or headers
+            raise HTTPException(502, f"provider returned HTTP {exc.response.status_code}")
+        except httpx.HTTPError:
+            raise HTTPException(502, "could not reach the provider")
         except Exception as exc:  # NotConfigured, SpendGuard, provider errors: tell the owner why
             raise HTTPException(400, str(exc)[:300])
 
@@ -201,9 +250,12 @@ def create_app(compute=None, hub=None, start_tools=True):
 
     @app.post("/api/stt")
     async def stt(file: UploadFile = File(...), user: str = Depends(owner)):
-        data = await file.read()
-        if len(data) > 25 * 1024 * 1024:
-            raise HTTPException(413, "audio too large")
+        limit = STT_LIMIT  # the middleware already bounded Content-Length; this still bounds the in-memory copy
+        data = b""
+        while chunk := await file.read(1024 * 1024):
+            data += chunk
+            if len(data) > limit:
+                raise HTTPException(413, "audio too large")
         resp = await gateway("/v1/audio/transcriptions", files={"file": (file.filename or "audio.webm", data)}, data={"model": "stt"})
         return {"text": resp.json().get("text", "")}
 
@@ -258,11 +310,16 @@ def create_app(compute=None, hub=None, start_tools=True):
 
     @app.post("/api/compute/runpod/pods/{pod_id}/terminate")
     async def pod_terminate(pod_id: str, user: str = Depends(owner)):
+        if not POD_ID_RE.match(pod_id):
+            raise HTTPException(422, "invalid pod id")
+        args = {"pod_id": pod_id}
         try:
-            await compute.runpod().terminate(pod_id)
-        except NotConfigured as exc:
-            raise HTTPException(400, str(exc))
-        return {"terminated": pod_id}
+            name = next((p["name"] for p in await compute.runpod().list_pods() if p["id"] == pod_id), None)
+        except Exception:  # the name is only a courtesy for the confirm card
+            name = None
+        if name:
+            args["name"] = re.sub(r"[^\x20-\x7e]", "", str(name))[:80]  # printable ASCII only: no bidi/control chars on the confirm card
+        return {"pending": hub.queue("runpod_terminate_pod", args)}
 
     @app.post("/api/compute/kaggle/run")
     async def kaggle_run(body: KaggleIn, user: str = Depends(owner)):

@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "agents"))
 import runtime  # noqa: E402  (connect_servers, MUTATING)
 import approvals  # noqa: E402
 from actions import gate  # noqa: E402
+from jarvis.compute.models import KaggleIn, PodIn  # noqa: E402
 from policy import Policy  # noqa: E402
 from redact import redact  # noqa: E402
 
@@ -38,6 +39,9 @@ LOCAL_TOOLS = {
     "kaggle_run_script": ("Propose running a Python script on Kaggle (free GPU; owner confirms).", {
         "slug": {"type": "string"}, "code": {"type": "string"}, "gpu": {"type": "boolean"}}, True),
 }
+
+COMPUTE_INPUT = {"runpod_create_pod": PodIn, "kaggle_run_script": KaggleIn}
+REST_ONLY = {"runpod_terminate_pod"}  # queued only by the REST endpoint, never offered to or callable by the model; run only via confirm
 
 
 def contains_secret(text):
@@ -79,7 +83,11 @@ class Hub:
         route = self.routes.get(name)
         return bool(route and route[0] == "infra" and route[2] in runtime.MUTATING)
 
-    async def execute(self, name, args):
+    async def execute(self, name, args, confirmed=False):
+        if name in LOCAL_TOOLS and LOCAL_TOOLS[name][2] and not confirmed:
+            raise PermissionError("this action needs the owner's confirmation")
+        if confirmed and name in REST_ONLY:
+            return json.dumps(await self.compute.run(name, args))[:4000]
         if name in LOCAL_TOOLS:
             return json.dumps(await self.compute.run(name, args))[:4000]
         if name not in self.routes:
@@ -91,6 +99,12 @@ class Hub:
 
     def queue(self, name, args):
         self._expire()
+        model = COMPUTE_INPUT.get(name)
+        if model:  # same validation as the REST endpoints, so a bad proposal never reaches the confirm card
+            try:
+                args = model(**args).model_dump()
+            except ValueError as exc:  # pydantic's ValidationError is one
+                raise ValueError(f"invalid arguments for {name}: {str(exc)[:200]}") from None
         route = self.routes.get(name)
         if route and route[0] == "infra" and route[2] in runtime.MUTATING:  # shared, persistent queue (also shown in the Autonomy tab)
             return approvals.queue(name, str(args.get("domain", "")), {k: v for k, v in args.items() if k != "dry_run"}, {"source": "jarvis chat"})
@@ -109,7 +123,7 @@ class Hub:
         if item is not None:
             self.inflight.add(pid)
             try:
-                return await self.execute(item["name"], item["args"])
+                return await self.execute(item["name"], item["args"], confirmed=True)
             except Exception:  # the pop above is synchronous (double-click safe); a failed run must stay retryable
                 if pid not in self.discarded:  # unless the owner discarded it while it ran
                     self.pending[pid] = item
