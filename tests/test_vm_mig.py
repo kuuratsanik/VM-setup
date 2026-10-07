@@ -611,3 +611,174 @@ def test_resume_daemon_start_failure_is_red_and_keeps_recording(env):
     (env["shim"] / "startfail").write_text("")
     r = run(env, "vm-mig-resume", "T2")
     assert r.returncode == 0, r.stderr
+
+
+# ---------------------------------------------------------------- owner-run phase scripts (p0a.sh, t3.sh)
+
+PHASE_SHIMS = {
+    "zpool": r"""echo "${CAP:-70}%" """,
+    "zfs": r"""echo "zfs $*" >> "$S/log"
+        case "$*" in "get -H -o value keystatus,mounted rpool/backup-critical") printf 'available\nyes\n' ;; esac
+        case $1 in list|get) exit 1 ;; esac; exit 0""",
+    "free": r"""printf 'x\nMem: 30 17 13\nSwap: 23 %s 10\n' "${SWAP:-5}" """,
+    "systemctl": r"""echo "systemctl $*" >> "$S/log"; exit 0""",
+    "virsh": r"""echo "virsh $*" >> "$S/log"; exit 1""",
+    "ip": r"""echo "ip $*" >> "$S/log"; exit 1""",
+    "ss": r"""printf 'UNCONN 0 0 127.0.0.1:53 x\nUNCONN 0 0 100.126.113.62:53 x\nUNCONN 0 0 192.168.88.246:53 x\nUNCONN 0 0 127.0.0.53%%lo:53 x\nUNCONN 0 0 127.0.0.54:53 x\n'""",
+    "ufw": r"""echo "ufw $*" >> "$S/log"; echo ok""",
+    "iptables-save": r"""echo "*filter" """,
+    "nft": r"""echo "table inet x { }" """,
+    "restic": r"""echo "restic $*" >> "$S/log"; exit 0""",
+    "runuser": r"""shift 3; exec "$@" """,
+    "logger": r"""exit 0""",
+    "brake-advise": r"""exit "${BRAKE_RC:-0}" """,
+    "vm-mig-guard": r"""echo "guard $*" >> "$S/log"; exit "${GUARD_RC:-0}" """,
+    "system-agent": r"""echo "system-agent $*" >> "$S/log"; exit 0""",
+}
+MUTATING = ("zfs snapshot", "zfs create", "systemctl enable", "systemctl stop", "restic init", "zfs load-key",
+            "zfs unload-key", "guard run", "system-agent acquire", "system-agent intent")
+
+
+@pytest.fixture
+def phase(tmp_path):
+    s = tmp_path / "shim"
+    (s / "bin").mkdir(parents=True)
+    for name, body in PHASE_SHIMS.items():
+        p = s / "bin" / name
+        p.write_text("#!/usr/bin/env bash\n" + textwrap.dedent(body))
+        p.chmod(0o755)
+    sysd = tmp_path / "sys"
+    sysd.mkdir()
+    for f, v in {"enabled": "N", "compressor": "lzo", "max_pool_percent": "20", "zfs_arc_max": "1073741824"}.items():
+        (sysd / f).write_text(v + "\n")
+    zrep = tmp_path / "zfs-replicate.sh"
+    zrep.write_text('#!/bin/bash\nSOURCES="rpool/ROOT rpool/USERDATA rpool/var bpool/BOOT"\n')
+    (tmp_path / "loadavg").write_text("1.0 1.0 1.0 1/1 1\n")
+    (tmp_path / "exposure.prom").write_text("x 1\n")
+    (tmp_path / "tmpfiles").mkdir()
+    audit = tmp_path / "AUDIT_LOG.md"
+    audit.write_text("")
+    e = dict(os.environ)
+    e.update(PATH=f"{s / 'bin'}:/usr/bin:/bin", S=str(s), VMMIG_BUS="", VMMIG_STATE=str(tmp_path / "state"),
+             VMMIG_ROOT=str(tmp_path / "root"), PH_BRAKE=str(s / "bin" / "brake-advise"),
+             VMMIG_GUARD=str(s / "bin" / "vm-mig-guard"), PH_SYSAGENT=str(s / "bin" / "system-agent"),
+             PH_LOADAVG=str(tmp_path / "loadavg"), PH_AUDIT=str(audit), ZSWAP=str(sysd), ARC=str(sysd / "zfs_arc_max"),
+             ZREP=str(zrep), TMPFILES=str(tmp_path / "tmpfiles"), EXPOSURE_PROM=str(tmp_path / "exposure.prom"),
+             LV_LINK=str(tmp_path / "default.xml"), G7KEY=str(tmp_path / "g7.key"), G7DIR=str(tmp_path / "g7"),
+             EXTRA=str(tmp_path / "escrow-extra.paths"), G7_BACKUP=str(SCRIPTS / "g7-backup"),
+             G7_VERIFY=str(SCRIPTS / "g7-verify"), G7_DIR=str(tmp_path / "bc"),
+             G7_HDD_REPO=str(tmp_path / "hdd-repo"))
+    return {"env": e, "tmp": tmp_path, "shim": s, "sys": sysd, "zrep": zrep, "audit": audit}
+
+
+def prun(ph, script, *args, stdin="", **env):
+    e = dict(ph["env"], **env)
+    return subprocess.run([str(SCRIPTS / script), *args], env=e, input=stdin, capture_output=True, text=True,
+                          timeout=120)
+
+
+def mutations(ph):
+    log = ph["shim"] / "log"
+    text = log.read_text() if log.exists() else ""
+    return [m for m in MUTATING if m in text]
+
+
+def unchanged(ph):
+    assert (ph["sys"] / "enabled").read_text() == "N\n"
+    assert (ph["sys"] / "zfs_arc_max").read_text() == "1073741824\n"
+    assert "rpool/vm" not in ph["zrep"].read_text()
+    assert not list((ph["tmp"] / "tmpfiles").iterdir())
+    assert not (ph["tmp"] / "g7.key").exists() and not (ph["tmp"] / "g7").exists()
+    assert ph["audit"].read_text() == ""
+
+
+def test_p0a_dry_run_changes_nothing_and_lists_steps(phase):
+    r = prun(phase, "p0a.sh", "--dry-run")
+    assert r.returncode == 0, r.stdout + r.stderr
+    for s in ("G9", "snapshots", "libvirt", "datasets", "zfs-replicate", "memory", "backup-critical"):
+        assert f"== {s}" in r.stdout
+    assert "DRY-RUN complete" in r.stdout and "WOULD check: libvirt daemon active" in r.stdout
+    assert mutations(phase) == [] and not (phase["tmp"] / "root").exists()
+    unchanged(phase)
+
+
+@pytest.mark.parametrize("env", [{"BRAKE_RC": "1"}, {"SWAP": "10"}])
+def test_p0a_g8_red_refuses_before_any_change(phase, env, tmp_path):
+    if "SWAP" not in env:
+        pass
+    r = prun(phase, "p0a.sh", **env)
+    assert r.returncode == 75 and "WAIT" in r.stdout
+    assert mutations(phase) == []
+    unchanged(phase)
+
+
+def test_p0a_load_red_refuses(phase):
+    (phase["tmp"] / "loadavg").write_text("5.2 5 5 1/1 1\n")
+    r = prun(phase, "p0a.sh")
+    assert r.returncode == 75 and "RED  G8 load1 5.2" in r.stdout
+
+
+def test_p0a_force_g8_needs_exact_typed_confirmation(phase):
+    r = prun(phase, "p0a.sh", "--force-g8", stdin="force g8\n", BRAKE_RC="1")
+    assert r.returncode == 75 and mutations(phase) == []
+
+
+def test_p0a_rpool_cap_never_overridable(phase):
+    r = prun(phase, "p0a.sh", "--force-g8", stdin="FORCE G8\n", CAP="85")
+    assert r.returncode == 75 and "never overridable" in r.stdout and mutations(phase) == []
+
+
+def test_p0a_guard_check_red_refuses(phase):
+    r = prun(phase, "p0a.sh", GUARD_RC="1")
+    assert r.returncode == 3 and "vm-mig-guard check" in r.stdout and mutations(phase) == []
+
+
+def test_p0a_forced_g8_still_needs_root(phase):
+    if os.geteuid() == 0:
+        pytest.skip("runs as root")
+    r = prun(phase, "p0a.sh", "--force-g8", stdin="FORCE G8\n", BRAKE_RC="1")
+    assert r.returncode == 1 and "run as root" in r.stdout and mutations(phase) == []
+
+
+def test_t3_dry_run_changes_nothing(phase):
+    (phase["shim"] / "bin" / "pg_restore").write_text("#!/bin/sh\nexit 0\n")
+    (phase["shim"] / "bin" / "pg_restore").chmod(0o755)
+    r = prun(phase, "t3.sh", "--dry-run")
+    assert r.returncode == 0, r.stdout + r.stderr
+    for s in ("password", "container", "restic-ssd", "restic-hdd", "hdd-keys", "backup", "verify",
+              "verify-hdd-only", "lock-hdd-keys", "escrow-paths"):
+        assert f"== {s}:" in r.stdout
+    assert "escrow.sh" in r.stdout and mutations(phase) == []
+    assert not (phase["tmp"] / "escrow-extra.paths").exists()
+    unchanged(phase)
+
+
+def test_t3_refuses_without_pg_restore(phase):
+    if subprocess.run(["bash", "-c", "PATH=/usr/bin:/bin pg_restore --version"]).returncode == 0:
+        pytest.skip("pg_restore installed on this machine")
+    r = prun(phase, "t3.sh")
+    assert r.returncode == 5 and "apt install postgresql-client" in r.stdout and mutations(phase) == []
+
+
+def test_t3_g8_red_refuses(phase):
+    r = prun(phase, "t3.sh", SWAP="12")
+    assert r.returncode == 75 and mutations(phase) == []
+
+
+def test_t3_never_prints_secret_material(phase):
+    r = prun(phase, "t3.sh", "--dry-run")
+    assert "/dev/urandom" not in r.stdout or "never displayed" in r.stdout
+
+
+def test_t3_pg_restore_check_runs_the_binary(phase):
+    (phase["shim"] / "bin" / "pg_restore").write_text("#!/bin/sh\nexit 1\n")  # present but broken wrapper
+    (phase["shim"] / "bin" / "pg_restore").chmod(0o755)
+    r = prun(phase, "t3.sh")
+    assert r.returncode == 5 and "RED  pg_restore runs" in r.stdout and mutations(phase) == []
+
+
+def test_p0a_zfs_replicate_restore_is_atomic():
+    t = (SCRIPTS / "p0a.sh").read_text()
+    assert 'cp -a "$bak" "$ZREP.tmp" && mv "$ZREP.tmp" "$ZREP"' in t
+    assert 'cp -a "$bak" "$ZREP";' not in t
+    assert 'for t in vm-mig-guard vm-mig-revert' in t

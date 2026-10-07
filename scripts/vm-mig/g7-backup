@@ -111,7 +111,7 @@ tar --zstd -C "$UHOME" -cf "$D/coordination.tar.zst" coordination && st coordina
 snapname=$BC@g7-$DATE
 zfs snapshot "$snapname" || rc=1
 parent=${REPLICA%/*}
-zfs list -H "$parent" >/dev/null 2>&1 || zfs create -o mountpoint=none -o canmount=off "$parent" || rc=1
+zfs list -H "$parent" >/dev/null 2>&1 || zfs create -o mountpoint=none -o canmount=off -o com.sun:auto-snapshot=false "$parent" || rc=1
 prev=$(zfs list -H -t snapshot -o name -s creation "$REPLICA" 2>/dev/null | grep '@g7-' | tail -1 | sed 's/.*@/@/')
 if [ -n "$prev" ]; then zfs send -w -i "$prev" "$snapname" | zfs recv -u "$REPLICA" || rc=1
 else zfs send -w "$snapname" | zfs recv -u -o mountpoint=none -o com.sun:auto-snapshot=false "$REPLICA" || rc=1; fi
