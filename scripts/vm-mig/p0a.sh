@@ -41,7 +41,7 @@ if [ "${1:-}" = __libvirt_change ]; then
   fi
   # shellcheck disable=SC2086
   systemctl enable --now $LV_SVCS || exit 1
-  sleep 5
+  sleep "${LV_SETTLE:-5}"
   ok=0
   # shellcheck disable=SC2086
   systemctl is-active --quiet $LV_SVCS && say "PASS libvirt daemon(s) active" || { say "FAIL libvirt not active"; ok=1; }
@@ -62,13 +62,14 @@ for a in "$@"; do
   esac
 done
 
+[ "$PH_DRY" = 1 ] || ph_lock "$PHASE"
 say "P0a (plan rev 9.2). $( [ "$PH_DRY" = 1 ] && echo 'DRY-RUN: nothing will be changed.' )"
 # ---- pre-gates (read-only; a red gate stops before anything is changed) ------------------------------
 g8_gate
 if "$VMMIG_GUARD" check >/dev/null 2>&1; then say "PASS vm-mig-guard check (reachability)"
 else say "RED  vm-mig-guard check: fix reachability/expected.env first"; [ "$PH_DRY" = 1 ] || exit 3; fi
 if [ "$PH_DRY" = 0 ]; then
-  [ "$(id -u)" = 0 ] || { say "run as root (sudo)"; exit 1; }
+  ph_require_root
   systemctl is-enabled --quiet vm-mig-boot-revert.service || { say "RED  vm-mig-boot-revert.service not enabled (T1 not installed)"; exit 3; }
   for t in vm-mig-guard vm-mig-revert; do   # the dead-man that will run must be the reviewed one
     cmp -s "$VMMIG_BIN/$t" "$(dirname "$SELF")/$t" || { say "RED  installed $VMMIG_BIN/$t != reviewed copy (re-run install.sh)"; exit 3; }
@@ -102,7 +103,8 @@ snapshot_state() { # suffix
   ufw status numbered > "$D/ufw.$1" 2>/dev/null
   dns53 > "$D/dns53.$1"
 }
-g9_done() { false; }
+# Re-run safe: the FIRST run's artifacts and pre-state are the rollback reference; never overwrite them.
+g9_done() { local f; for f in ufw.txt iptables.txt nft.txt exposure.prom dns53.before ufw.before; do [ -s "$D/$f" ] || return 1; done; }
 g9_do() {
   ufw status numbered > "$D/ufw.txt" && iptables-save > "$D/iptables.txt" && nft list ruleset > "$D/nft.txt" \
     && cp "$EXPOSURE_PROM" "$D/exposure.prom" && snapshot_state before
@@ -113,14 +115,18 @@ if [ "$PH_DRY" = 1 ]; then
 else
   step G9 "firewall rollback artifacts + pre-state" g9_done g9_do g9_verify; rc=$?; [ $rc = 0 ] || stop $rc "G9"
 fi
-DNS53_BEFORE=$(dns53); export DNS53_BEFORE
+if [ -s "$D/dns53.before" ]; then DNS53_BEFORE=$(cat "$D/dns53.before"); else DNS53_BEFORE=$(dns53); fi
+export DNS53_BEFORE
 say ":53 listeners before: $DNS53_BEFORE (plan expects 5)"
 
 # ---- snapshots -----------------------------------------------------------------------------------
-SNAPS="rpool/ROOT@pre-P0a rpool/var@pre-P0a bpool/BOOT@pre-P0a"
-snap_done() { local s; for s in $SNAPS; do zfs list -H -t snapshot "$s" >/dev/null 2>&1 || return 1; done; }
-snap_do() { zfs snapshot -r rpool/ROOT@pre-P0a rpool/var@pre-P0a bpool/BOOT@pre-P0a; }
-step snapshots "zfs snapshot -r $SNAPS" snap_done snap_do snap_done; rc=$?; [ $rc = 0 ] || stop $rc snapshots
+SNAP_DS="rpool/ROOT rpool/var bpool/BOOT"
+# shellcheck disable=SC2086
+snap_done() { ph_snapshots_complete pre-P0a $SNAP_DS >/dev/null; }
+# shellcheck disable=SC2086
+snap_do() { ph_snapshot_per_pool pre-P0a $SNAP_DS; }
+step snapshots "zfs snapshot -r rpool/ROOT@pre-P0a rpool/var@pre-P0a; then zfs snapshot -r bpool/BOOT@pre-P0a (one atomic snapshot per pool)" \
+  snap_done snap_do snap_done; rc=$?; [ $rc = 0 ] || stop $rc snapshots
 
 # ---- libvirt under the dead-man --------------------------------------------------------------------
 lv_done() { systemctl is-enabled --quiet $LV_SVCS 2>/dev/null && [ ! -e "$LV_LINK" ] && [ ! -L "$LV_LINK" ]; }
@@ -179,9 +185,9 @@ mem_done() {
     && [ -s "$TMPFILES/vm-mig-zswap.conf" ] && [ -s "$TMPFILES/vm-mig-arc.conf" ]
 }
 mem_do() {
-  { echo "zswap.enabled=$(cat "$ZSWAP/enabled") zswap.compressor=$(cat "$ZSWAP/compressor")" \
+  [ -s "$D/memory.before" ] || { echo "zswap.enabled=$(cat "$ZSWAP/enabled") zswap.compressor=$(cat "$ZSWAP/compressor")" \
          "zswap.max_pool_percent=$(cat "$ZSWAP/max_pool_percent") zfs_arc_max=$(cat "$ARC")"; } > "$D/memory.before"
-  say "   rollback values saved to $D/memory.before"
+  say "   rollback values in $D/memory.before (first run's values are kept on a re-run)"
   echo zstd > "$ZSWAP/compressor" && echo 20 > "$ZSWAP/max_pool_percent" && echo Y > "$ZSWAP/enabled" || return 1
   echo $ARC_NEW > "$ARC" || return 1
   printf '%s\n' "# VM migration P0a (plan §2d): zswap at runtime, no bootloader change" \
@@ -199,14 +205,18 @@ rc=$?; [ $rc = 0 ] || stop $rc memory
 bc_done() { zfs list -H rpool/backup-critical >/dev/null 2>&1 && grep -qx 'x /var/tmp/vm-mig' "$TMPFILES/vm-mig.conf" 2>/dev/null; }
 bc_do() {
   if ! zfs list -H rpool/backup-critical >/dev/null 2>&1; then
-    if [ -e "$G7KEY" ]; then say "   $G7KEY already exists but the dataset does not: owner decides (not overwritten)"; return 1; fi
-    install -d -m 700 "$(dirname "$G7KEY")" && (umask 077; dd if=/dev/urandom of="$G7KEY" bs=32 count=1 status=none) \
-      && chmod 400 "$G7KEY" || return 1
+    if [ -e "$G7KEY" ] && [ ! -e "$D/g7.key.created-by-p0a" ]; then
+      say "   $G7KEY already exists but the dataset does not, and this phase did not create it: owner decides (never overwritten)"; return 1
+    fi
+    if [ ! -e "$G7KEY" ]; then   # created once; a re-run after a failed zfs create reuses this run's key
+      install -d -m 700 "$(dirname "$G7KEY")" && (umask 077; dd if=/dev/urandom of="$G7KEY" bs=32 count=1 status=none) \
+        && chmod 400 "$G7KEY" && touch "$D/g7.key.created-by-p0a" || return 1
+    fi
     zfs create -o encryption=aes-256-gcm -o keyformat=raw -o keylocation="file://$G7KEY" \
       -o mountpoint=/srv/backup-critical -o compression=zstd -o quota=12G rpool/backup-critical || return 1
   fi
   printf '%s\n' "# VM migration (plan §7a/P0a): never age-clean the staging copies" "x /var/tmp/vm-mig" > "$TMPFILES/vm-mig.conf"
-  install -d -m 700 /var/tmp/vm-mig
+  install -d -m 700 "${VMTMP:-/var/tmp/vm-mig}"
 }
 bc_verify() {
   [ "$(zfs get -H -o value encryption rpool/backup-critical)" = aes-256-gcm ] \

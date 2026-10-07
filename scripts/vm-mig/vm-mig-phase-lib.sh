@@ -15,6 +15,57 @@ VMMIG_GUARD=${VMMIG_GUARD:-$VMMIG_BIN/vm-mig-guard}
 PH_PASSED=(); PH_FAILED=(); PH_LEASE=""; PH_INTENT=""
 
 say() { printf '%s\n' "$*"; }
+
+# Single instance per phase (real runs only; dry-runs change nothing and take no lock).
+PH_LOCKDIR=${PH_LOCKDIR:-/run}
+ph_lock() { # phase
+  local f="$PH_LOCKDIR/vm-mig-$1.lock"
+  exec 6>>"$f" || { say "cannot open the lock $f (run as root)"; exit 1; }
+  flock -n 6 || { say "another $1 run is already in progress (lock $f is held); this one exits without changes"; exit 73; }
+}
+
+ph_require_root() { # VMMIG_TEST_NONROOT=1 exists ONLY for the sandbox tests; real operations still need root
+  [ "$(id -u)" = 0 ] || [ "${VMMIG_TEST_NONROOT:-}" = 1 ] || { say "run as root (sudo)"; exit 1; }
+}
+
+# ph_snapshot_per_pool SNAP DS... : one atomic `zfs snapshot -r` PER POOL (libzfs refuses one atomic
+# snapshot spanning pools: "multiple snapshots of same fs not allowed", EXDEV). Re-run safe: a dataset
+# whose @SNAP already exists is kept; any descendant that lacks @SNAP (e.g. created after the first
+# run) gets its own non-recursive snapshot. No snapshot is ever destroyed or recreated.
+ph_tree() { zfs list -H -o name -r "$1" 2>/dev/null | grep -v '@'; }
+ph_snapshot_per_pool() {
+  local snap=$1 ds pool pools=() p missing c; shift
+  for ds in "$@"; do pool=${ds%%/*}; [[ " ${pools[*]} " == *" $pool "* ]] || pools+=("$pool"); done
+  for p in "${pools[@]}"; do
+    missing=()
+    for ds in "$@"; do
+      [ "${ds%%/*}" = "$p" ] || continue
+      if zfs list -H -t snapshot "$ds@$snap" >/dev/null 2>&1; then say "   $ds@$snap exists; kept"
+      else missing+=("$ds@$snap"); fi
+    done
+    if [ ${#missing[@]} -gt 0 ]; then
+      zfs snapshot -r "${missing[@]}" || { say "   zfs snapshot -r ${missing[*]} failed (pool $p)"; return 1; }
+      say "   created (pool $p): ${missing[*]}"
+    fi
+  done
+  for ds in "$@"; do   # descendants created after an earlier run: snapshot each one individually
+    for c in $(ph_tree "$ds"); do
+      zfs list -H -t snapshot "$c@$snap" >/dev/null 2>&1 && continue
+      zfs snapshot "$c@$snap" || { say "   zfs snapshot $c@$snap failed"; return 1; }
+      say "   created missing descendant snapshot $c@$snap"
+    done
+  done
+  ph_snapshots_complete "$snap" "$@"
+}
+ph_snapshots_complete() { # SNAP DS... -> 0 only if every dataset AND every descendant has @SNAP
+  local snap=$1 ds c; shift
+  for ds in "$@"; do
+    zfs list -H "$ds" >/dev/null 2>&1 || { say "   dataset missing: $ds"; return 1; }
+    for c in $(ph_tree "$ds"); do
+      zfs list -H -t snapshot "$c@$snap" >/dev/null 2>&1 || { say "   missing: $c@$snap"; return 1; }
+    done
+  done
+}
 pass() { say "PASS $*"; PH_PASSED+=("$1"); [ "$PH_DRY" = 1 ] || echo "$(date -u +%FT%TZ) $1 PASS" >> "$D/steps.log"; }
 failv() { say "FAIL $*"; PH_FAILED+=("$1"); }
 
@@ -74,7 +125,12 @@ lease_acquire() { # phase subsystem target blast rationale
      && "${as[@]}" "$PH_SYSAGENT" acquire --subsystem "$2" --intent-id "$PH_INTENT" --ttl 180 >/dev/null 2>&1; then
     PH_LEASE=$2; say "intent $PH_INTENT, lease on '$2' acquired"
   else
-    say "system-agent intent/lease unavailable; logging to the bus instead (best-effort)"
+    local holder
+    holder=$("${as[@]}" "$PH_SYSAGENT" status 2>/dev/null \
+      | jq -c --arg s "$2" '.leases[]? | select(tostring | contains($s))' 2>/dev/null)
+    say "system-agent lease on '$2' NOT acquired."
+    say "  current holder: ${holder:-none listed by 'system-agent status' (system-agent unavailable?)}"
+    ask "Continue WITHOUT a lease (bus log only)?" || { say "stopping: no lease, nothing changed"; exit 2; }
     bus "$1 started by the owner (system-agent intent/lease unavailable); intent id $PH_INTENT"
   fi
 }

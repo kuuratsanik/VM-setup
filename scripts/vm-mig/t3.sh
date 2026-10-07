@@ -35,6 +35,7 @@ for a in "$@"; do
     *) echo "usage: t3.sh [--dry-run] [--force-g8]" >&2; exit 64 ;;
   esac
 done
+[ "$PH_DRY" = 1 ] || ph_lock "$PHASE"
 say "T3 (plan rev 9.2 §7b). $( [ "$PH_DRY" = 1 ] && echo 'DRY-RUN: nothing will be changed.' )"
 
 # ---- pre-gates (read-only) -------------------------------------------------------------------------
@@ -52,7 +53,7 @@ prereq "HDD repo is not the existing restic repo" '[ "$(readlink -m "$HDD_REPO")
 }
 if [ $pre_red = 1 ] && [ "$PH_DRY" = 0 ]; then say "pre-gates RED: nothing changed"; exit 5; fi
 if [ "$PH_DRY" = 0 ]; then
-  [ "$(id -u)" = 0 ] || { say "run as root (sudo)"; exit 1; }
+  ph_require_root
   D=$VMMIG_ROOT/$PHASE; mkdir -p "$D" && chmod 700 "$D"
 else
   D=$(mktemp -d)

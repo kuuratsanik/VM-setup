@@ -617,9 +617,32 @@ def test_resume_daemon_start_failure_is_red_and_keeps_recording(env):
 
 PHASE_SHIMS = {
     "zpool": r"""echo "${CAP:-70}%" """,
+    # Stateful zfs: datasets/snapshots are files in $S/zfsds. `snapshot` across pools fails exactly like
+    # libzfs (EXDEV): "multiple snapshots of same fs not allowed" + "no snapshots were created".
     "zfs": r"""echo "zfs $*" >> "$S/log"
-        case "$*" in "get -H -o value keystatus,mounted rpool/backup-critical") printf 'available\nyes\n' ;; esac
-        case $1 in list|get) exit 1 ;; esac; exit 0""",
+        st="$S/zfsds"; mkdir -p "$st"; k() { echo "${1//\//%}"; }
+        cmd=$1; shift
+        case $cmd in
+          snapshot) names=(); for a in "$@"; do case $a in -*) ;; *) names+=("$a") ;; esac; done
+            np=$(for n in "${names[@]}"; do n=${n%%@*}; echo "${n%%/*}"; done | sort -u | wc -l)
+            if [ "$np" -gt 1 ]; then echo "cannot create snapshots : multiple snapshots of same fs not allowed" >&2
+              echo "no snapshots were created" >&2; exit 1; fi
+            for n in "${names[@]}"; do [ -e "$st/$(k "$n")" ] && { echo "cannot create snapshot '$n': dataset already exists" >&2; exit 1; }; done
+            for n in "${names[@]}"; do : > "$st/$(k "$n")"; done ;;
+          create) props=(); while [ "$1" = -o ]; do props+=("$2"); shift 2; done
+            [ -e "$st/$(k "$1")" ] && { echo "dataset already exists" >&2; exit 1; }
+            printf '%s\n' "${props[@]}" > "$st/$(k "$1")" ;;
+          list) names=(); r=0; while [ $# -gt 0 ]; do case $1 in -t|-o) shift 2 ;; -r) r=1; shift ;; -*) shift ;; *) names+=("$1"); shift ;; esac; done
+            if [ ${#names[@]} -eq 0 ]; then ls "$st" | tr % /; exit 0; fi
+            if [ $r = 1 ]; then for n in "${names[@]}"; do [ -e "$st/$(k "$n")" ] || exit 1
+              ls "$st" | tr % / | grep -E "^${n}(/|@|$)" | sort; done; exit 0; fi
+            for n in "${names[@]}"; do [ -e "$st/$(k "$n")" ] || exit 1; done ;;
+          get) while [ "${1#-}" != "$1" ]; do [ "$1" = -o ] && shift; shift; done
+            n=$2; [ -e "$st/$(k "$n")" ] || exit 1; IFS=, read -ra ps <<<"$1"
+            for p in "${ps[@]}"; do case $p in keystatus) echo available ;; mounted) echo yes ;;
+              quota) [ "$(grep '^quota=' "$st/$(k "$n")" | cut -d= -f2)" = 12G ] && echo 12884901888 || echo 0 ;;
+              *) grep "^$p=" "$st/$(k "$n")" | cut -d= -f2 ;; esac; done ;;
+        esac; exit 0""",
     "free": r"""printf 'x\nMem: 30 17 13\nSwap: 23 %s 10\n' "${SWAP:-5}" """,
     "systemctl": r"""echo "systemctl $*" >> "$S/log"; exit 0""",
     "virsh": r"""echo "virsh $*" >> "$S/log"; exit 1""",
@@ -632,8 +655,12 @@ PHASE_SHIMS = {
     "runuser": r"""shift 3; exec "$@" """,
     "logger": r"""exit 0""",
     "brake-advise": r"""exit "${BRAKE_RC:-0}" """,
-    "vm-mig-guard": r"""echo "guard $*" >> "$S/log"; exit "${GUARD_RC:-0}" """,
-    "system-agent": r"""echo "system-agent $*" >> "$S/log"; exit 0""",
+    "vm-mig-guard": r"""echo "guard $*" >> "$S/log"
+        if [ "$1" = run ]; then shift 3; [ "$1" = -- ] && shift; "$@"; exit $?; fi
+        exit "${GUARD_RC:-0}" """,
+    "system-agent": r"""echo "system-agent $*" >> "$S/log"
+        [ "$1" = status ] && { echo '{"leases":[{"subsystem":"libvirt","agent":"claude-other","until":"later"}]}'; exit 0; }
+        [ "$1" = acquire ] && exit "${SA_ACQUIRE_RC:-0}"; exit 0""",
 }
 MUTATING = ("zfs snapshot", "zfs create", "systemctl enable", "systemctl stop", "restic init", "zfs load-key",
             "zfs unload-key", "guard run", "system-agent acquire", "system-agent intent")
@@ -658,6 +685,13 @@ def phase(tmp_path):
     (tmp_path / "tmpfiles").mkdir()
     audit = tmp_path / "AUDIT_LOG.md"
     audit.write_text("")
+    (s / "zfsds").mkdir()
+    for ds in ("rpool%ROOT", "rpool%var", "bpool%BOOT"):
+        (s / "zfsds" / ds).write_text("")
+    (tmp_path / "networks").mkdir()
+    (tmp_path / "networks" / "default.xml").write_text("<network/>")
+    os.symlink(tmp_path / "networks" / "default.xml", tmp_path / "default.xml")
+    (tmp_path / "locks").mkdir()
     e = dict(os.environ)
     e.update(PATH=f"{s / 'bin'}:/usr/bin:/bin", S=str(s), VMMIG_BUS="", VMMIG_STATE=str(tmp_path / "state"),
              VMMIG_ROOT=str(tmp_path / "root"), PH_BRAKE=str(s / "bin" / "brake-advise"),
@@ -667,7 +701,8 @@ def phase(tmp_path):
              LV_LINK=str(tmp_path / "default.xml"), G7KEY=str(tmp_path / "g7.key"), G7DIR=str(tmp_path / "g7"),
              EXTRA=str(tmp_path / "escrow-extra.paths"), G7_BACKUP=str(SCRIPTS / "g7-backup"),
              G7_VERIFY=str(SCRIPTS / "g7-verify"), G7_DIR=str(tmp_path / "bc"),
-             G7_HDD_REPO=str(tmp_path / "hdd-repo"))
+             G7_HDD_REPO=str(tmp_path / "hdd-repo"), PH_LOCKDIR=str(tmp_path / "locks"),
+             VMTMP=str(tmp_path / "vmtmp"), LV_SETTLE="0")
     return {"env": e, "tmp": tmp_path, "shim": s, "sys": sysd, "zrep": zrep, "audit": audit}
 
 
@@ -689,6 +724,7 @@ def unchanged(ph):
     assert "rpool/vm" not in ph["zrep"].read_text()
     assert not list((ph["tmp"] / "tmpfiles").iterdir())
     assert not (ph["tmp"] / "g7.key").exists() and not (ph["tmp"] / "g7").exists()
+    assert not [p for p in (ph["shim"] / "zfsds").iterdir() if "@" in p.name]
     assert ph["audit"].read_text() == ""
 
 
@@ -782,3 +818,117 @@ def test_p0a_zfs_replicate_restore_is_atomic():
     assert 'cp -a "$bak" "$ZREP.tmp" && mv "$ZREP.tmp" "$ZREP"' in t
     assert 'cp -a "$bak" "$ZREP";' not in t
     assert 'for t in vm-mig-guard vm-mig-revert' in t
+
+
+
+# ---- live-bug regressions (2026-10-07: cross-pool atomic snapshot, re-run safety, single instance)
+
+YES = "y\n" * 40
+
+
+def real(ph, script, *args, stdin=YES, **env):
+    return prun(ph, script, *args, stdin=stdin, VMMIG_TEST_NONROOT="1", VMMIG_BIN=str(SCRIPTS), **env)
+
+
+def snaps(ph):
+    return sorted(p.name.replace("%", "/") for p in (ph["shim"] / "zfsds").iterdir() if "@" in p.name)
+
+
+def snapshot_calls(ph):
+    return [l for l in (ph["shim"] / "log").read_text().splitlines() if l.startswith("zfs snapshot")]
+
+
+def test_zfs_stub_rejects_multi_pool_snapshot_like_libzfs(phase):
+    r = subprocess.run(["zfs", "snapshot", "-r", "rpool/ROOT@x", "rpool/var@x", "bpool/BOOT@x"], env=phase["env"],
+                       capture_output=True, text=True)
+    assert r.returncode == 1 and "multiple snapshots of same fs not allowed" in r.stderr
+    assert "no snapshots were created" in r.stderr and snaps(phase) == []
+
+
+def test_p0a_full_sandbox_run_snapshots_per_pool(phase):
+    r = real(phase, "p0a.sh")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert snaps(phase) == ["bpool/BOOT@pre-P0a", "rpool/ROOT@pre-P0a", "rpool/var@pre-P0a"]
+    assert snapshot_calls(phase) == ["zfs snapshot -r rpool/ROOT@pre-P0a rpool/var@pre-P0a",
+                                     "zfs snapshot -r bpool/BOOT@pre-P0a"]
+    assert "rpool/vm" in phase["zrep"].read_text() and (phase["sys"] / "enabled").read_text() == "Y\n"
+    assert not (phase["tmp"] / "default.xml").is_symlink()
+    assert "PASS" in phase["audit"].read_text()
+
+
+def test_p0a_rerun_is_idempotent_and_keeps_first_artifacts(phase):
+    assert real(phase, "p0a.sh").returncode == 0
+    D = phase["tmp"] / "root" / "P0a"
+    first = {f: (D / f).read_text() for f in ("ufw.txt", "dns53.before", "memory.before", "ufw.before")}
+    baks = list(phase["tmp"].glob("zfs-replicate.sh.bak-*"))
+    calls = len(snapshot_calls(phase))
+    r = real(phase, "p0a.sh")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.count("already in place") >= 7
+    assert len(snapshot_calls(phase)) == calls  # no snapshot created, none destroyed
+    assert {f: (D / f).read_text() for f in first} == first
+    assert list(phase["tmp"].glob("zfs-replicate.sh.bak-*")) == baks
+    assert phase["zrep"].read_text().count("rpool/vm") == 1
+
+
+def test_p0a_partial_snapshots_completes_only_missing(phase):
+    (phase["shim"] / "zfsds" / "rpool%ROOT@pre-P0a").write_text("")
+    r = real(phase, "p0a.sh")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "rpool/ROOT@pre-P0a exists; kept" in r.stdout
+    assert snapshot_calls(phase) == ["zfs snapshot -r rpool/var@pre-P0a", "zfs snapshot -r bpool/BOOT@pre-P0a"]
+
+
+def test_p0a_refuses_foreign_g7_key(phase):
+    (phase["tmp"] / "g7.key").write_text("someone else's")
+    r = real(phase, "p0a.sh")
+    assert r.returncode != 0 and "never overwritten" in r.stdout
+    assert (phase["tmp"] / "g7.key").read_text() == "someone else's"
+
+
+@pytest.mark.parametrize("script,phase_name", [("p0a.sh", "P0a"), ("t3.sh", "T3")])
+def test_single_instance_lock(phase, script, phase_name):
+    lock = phase["tmp"] / "locks" / f"vm-mig-{phase_name}.lock"
+    holder = subprocess.Popen(["flock", str(lock), "sleep", "30"])
+    try:
+        for _ in range(100):
+            if subprocess.run(["flock", "-n", str(lock), "true"]).returncode:
+                break
+            time.sleep(0.05)
+        r = real(phase, script)
+    finally:
+        holder.kill(); holder.wait()
+    assert r.returncode == 73 and "already in progress" in r.stdout
+    assert mutations(phase) == []
+
+
+def test_two_concurrent_p0a_runs_only_one_proceeds(phase):
+    procs = [subprocess.Popen([str(SCRIPTS / "p0a.sh")], env=dict(phase["env"], VMMIG_TEST_NONROOT="1",
+             VMMIG_BIN=str(SCRIPTS), LV_SETTLE="2"), stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+             for _ in range(2)]
+    outs = [p.communicate(YES, timeout=120) for p in procs]
+    rcs = sorted(p.returncode for p in procs)
+    assert rcs == [0, 73], [o[0][-500:] for o in outs]
+    assert len(snapshot_calls(phase)) == 2
+
+
+
+def test_p0a_snapshots_child_created_after_first_run(phase):
+    assert real(phase, "p0a.sh").returncode == 0
+    (phase["shim"] / "zfsds" / "rpool%var%newchild").write_text("")   # appeared after pre-P0a was taken
+    r = real(phase, "p0a.sh")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "created missing descendant snapshot rpool/var/newchild@pre-P0a" in r.stdout
+    assert snapshot_calls(phase)[-1] == "zfs snapshot rpool/var/newchild@pre-P0a"   # individual, non-recursive
+    assert "rpool/var/newchild@pre-P0a" in snaps(phase) and "rpool/var@pre-P0a" in snaps(phase)
+
+
+def test_lease_held_shows_holder_and_defaults_to_no(phase):
+    r = real(phase, "p0a.sh", stdin="\n" * 40, SA_ACQUIRE_RC="1")
+    assert r.returncode == 2 and "claude-other" in r.stdout and "no lease, nothing changed" in r.stdout
+    assert snapshot_calls(phase) == [] and "rpool/vm" not in phase["zrep"].read_text()
+
+
+def test_lease_held_owner_may_continue(phase):
+    r = real(phase, "p0a.sh", SA_ACQUIRE_RC="1")
+    assert r.returncode == 0 and "claude-other" in r.stdout
