@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# g7-verify [--hdd-only] [<date>]: the G7 gate (plan §7b). Restores each copy independently into
+# /var/tmp/vm-mig/g7-test/{zfs,ssd,hdd} and checks it; restored plaintext is deleted afterwards.
+#
+# --hdd-only: restore from the HDD copies using ONLY HDD-resident key material. It needs
+# G7_HDD_KEY (raw ZFS key for the replica) and G7_HDD_RESTIC_PW, and REFUSES (exit 7) if either
+# lives on rpool. Today no such HDD-resident material exists (see the T3 report): the escrow is
+# an owner decision, so this mode fails closed until it does.
+#
+# Plan correction: the clone of a raw-received dataset has the origin's encryption root, so the key
+# is loaded on $REPLICA (the encryption root), not on the clone.
+set -uo pipefail
+. "$(dirname "$(readlink -f "$0")")/vm-mig-lib.sh"
+BCDIR=${G7_DIR:-/srv/backup-critical}
+HDD_REPO=${G7_HDD_REPO:-/ext-pool/backups/restic-critical}
+REPLICA=${G7_REPLICA:-ext-pool/g7/backup-critical}   # g7-backup's own raw target, not under ext-pool/replica
+BC=${G7_DATASET:-rpool/backup-critical}
+HDD_ONLY=0; [ "${1:-}" = --hdd-only ] && { HDD_ONLY=1; shift; }
+# Restored plaintext never lands on an unencrypted disk: inside the encrypted dataset normally, on
+# tmpfs for --hdd-only (that test assumes rpool is gone). Enforced below.
+# G7_TEST_DIR is only a PARENT: it must already exist, and the tool works in its own mktemp -d child,
+# which is the only thing it ever removes (G7_TEST_DIR=/dev/shm or =$BCDIR must never be wiped).
+if [ $HDD_ONLY = 1 ]; then T=${G7_TEST_DIR:-/dev/shm}; else T=${G7_TEST_DIR:-$BCDIR/tmp}; fi
+for c in sqlite3 restic zstd pg_restore sha256sum findmnt; do
+  command -v "$c" >/dev/null || { echo "prerequisite missing: $c" >&2; exit 5; }
+done
+DATE=${1:-$(date +%F)}
+D=$BCDIR/dumps/$DATE
+fail=0
+ok() { log "PASS $*"; }; bad() { log "FAIL $*"; fail=1; }
+
+on_extpool() { [[ $(findmnt -n -o SOURCE -T "$1" 2>/dev/null) =~ ^ext-pool(/|$) ]]; }
+
+check_tree() { # label dir
+  local l=$1 d=$2
+  [ -d "$d" ] || { bad "$l: $d missing"; return; }
+  (cd "$d" && sha256sum -c --quiet SHA256SUMS) && ok "$l sha256sum" || bad "$l sha256sum"
+  if [ -e "$d/vaultwarden.sqlite3" ]; then
+    [ "$(sqlite3 "$d/vaultwarden.sqlite3" 'PRAGMA integrity_check')" = ok ] && ok "$l vw integrity" || bad "$l vw integrity"
+    [ "$(sqlite3 "$d/vaultwarden.sqlite3" 'SELECT count(*) FROM ciphers')" = "$(cat "$d/vw.ciphers")" ] && ok "$l vw ciphers count" || bad "$l vw ciphers count"
+  fi
+  [ ! -e "$d/n8n.sqlite3" ] || { [ "$(sqlite3 "$d/n8n.sqlite3" 'PRAGMA integrity_check')" = ok ] && ok "$l n8n integrity" || bad "$l n8n integrity"; }
+  [ ! -e "$d/gitea-common.tar" ] || { tar -tf "$d/gitea-common.tar" >/dev/null && ok "$l gitea tar" || bad "$l gitea tar"; }
+  for p in "$d"/pg-*.dump; do [ -e "$p" ] && { pg_restore --list "$p" >/dev/null && ok "$l $(basename "$p")" || bad "$l $(basename "$p")"; }; done
+  tar --zstd -tf "$d/coordination.tar.zst" >/dev/null && ok "$l coordination tar" || bad "$l coordination tar"
+}
+
+cleanup() {
+  zfs list -H ext-pool/g7-test >/dev/null 2>&1 && zfs destroy ext-pool/g7-test
+  [ -n "${W:-}" ] && [ -d "$W" ] && rm -rf -- "$W"   # only our own mktemp child, never $T
+}
+[ -d "$T" ] && [ ! -L "$T" ] || { log "REFUSED: G7_TEST_DIR $T is not an existing directory"; exit 8; }
+read -r fst src < <(findmnt -n -o FSTYPE,SOURCE -T "$T")
+[ "$fst" = tmpfs ] || [ "$src" = "$BC" ] || { log "REFUSED: $T is on $fst $src (needs tmpfs or $BC)"; exit 8; }
+W=$(mktemp -d "$T/g7-test.XXXXXX") || { log "REFUSED: cannot create a work dir under $T"; exit 8; }
+trap cleanup EXIT
+
+if [ $HDD_ONLY = 1 ]; then
+  for k in "${G7_HDD_KEY:-}" "${G7_HDD_RESTIC_PW:-}"; do
+    [ -r "$k" ] || { log "REFUSED: HDD-only key material not provided"; exit 7; }
+    on_extpool "$k" || { log "REFUSED: $k is not on an ext-pool dataset (tmpfs/rpool copies prove nothing)"; exit 7; }
+  done
+  # a key already loaded from rpool would make the test pass without HDD material: unload it first
+  if [ "$(zfs get -H -o value keystatus "$REPLICA" 2>/dev/null)" = available ]; then
+    zfs unload-key "$REPLICA" || { log "REFUSED: cannot unload the cached key of $REPLICA"; exit 7; }
+  fi
+  ZKEY=$G7_HDD_KEY; export RESTIC_PASSWORD_FILE=$G7_HDD_RESTIC_PW
+else
+  ZKEY=${G7_ZFS_KEY:-/root/.config/g7/g7.key}; export RESTIC_PASSWORD_FILE=${G7_RESTIC_PASSWORD_FILE:?}
+  check_tree ssd-plain "$D"                                                       # SSD format A
+  restic -r "$BCDIR/restic" restore latest --target "$W/ssd" -q && check_tree ssd-restic "$W/ssd$D" || bad "ssd restic restore"
+  restic -r "$BCDIR/restic" check --read-data -q && ok "ssd restic check --read-data" || bad "ssd restic check"
+fi
+# HDD format A: raw ZFS replica
+if [ "$(zfs get -H -o value keystatus "$REPLICA" 2>/dev/null)" != available ]; then
+  zfs load-key -L "file://$ZKEY" "$REPLICA" || bad "load-key $REPLICA"
+fi
+zfs clone -o mountpoint="$W/zfs" "$REPLICA@g7-$DATE" ext-pool/g7-test && zfs mount ext-pool/g7-test 2>/dev/null
+check_tree hdd-zfs "$W/zfs/dumps/$DATE"
+# HDD format B: restic
+restic -r "$HDD_REPO" restore latest --target "$W/hdd" -q && check_tree hdd-restic "$W/hdd$D" || bad "hdd restic restore"
+restic -r "$HDD_REPO" check --read-data -q && ok "hdd restic check --read-data" || bad "hdd restic check"
+log "G7 verify $([ $fail = 0 ] && echo GREEN || echo RED) (date $DATE$([ $HDD_ONLY = 1 ] && echo ', HDD-only'))"
+exit $fail

@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# vm-mig-freeze <phase> [--dry-run] [--window-end <ISO-8601>]   allowlist freeze (plan §7a, T2)
+# vm-mig-freeze <phase> --gate [--window-end <ISO>]             exact-set gate only
+#
+# Order: bus warning -> record -> stop cron/anacron -> stop every non-allowlisted timer (system and
+# user) -> stop PROVEN agent daemons -> hold all snaps -> exact-set gate.
+# --dry-run records into a scratch dir (VMMIG_DRY_DIR or mktemp), changes nothing, and prints what
+# it WOULD stop. herdr/openrig are never stopped by this tool (owner consent required, §7a).
+set -uo pipefail
+. "$(dirname "$(readlink -f "$0")")/vm-mig-lib.sh"
+
+ALLOW_SYSTEM=${VMMIG_ALLOW_SYSTEM:-"systemd-tmpfiles-clean.timer logrotate.timer"}
+ALLOW_USER=${VMMIG_ALLOW_USER:-""}
+NAMED_USER="house-webhookd.service mcp-bridge.service webmcp-console.service console-http.service"
+NAMED_SYSTEM="ops-bot.service dashboard.service writer.service"
+EXEMPT='^(cloud-media-metrics|soc-promtail|soc-alertmanager-ntfy|tailscale-bridge@.*|.*-tailnet|blocky|crowdsec.*|suricata|apcupsd|herdr|openrig)\.service$'
+CONSENT_ONLY='^(herdr|openrig)\.service$'
+CODE_RE='/home/sven-katkosilt/(coordination/bin|ai-tools|\.local/lib/mcp-bridge|\.local/npm-global)'
+SEP='[[:space:]"'"'"',]+'
+# An ACTION on a migration target (not just a read), §7a proof rule.
+ACT_RE="virsh${SEP}(start|shutdown|destroy|undefine|define|create|reboot|suspend|resume|setmem|net-)|docker(${SEP}compose)?${SEP}(stop|start|restart|pause|unpause|kill|rm|up|down|run|update)|ufw${SEP}(allow|deny|reject|limit|delete|insert|route|reload|enable|disable|--force)|nft${SEP}(add|insert|delete|flush|replace|-f)|iptables${SEP}-[AIDFRN]|tailscale${SEP}(serve|up|set|funnel|down)|zfs${SEP}(create|destroy|snapshot|rollback|set|send|recv|receive|clone|promote|rename)|systemctl${SEP}(--user${SEP})?(start|stop|restart|enable|disable|kill|mask|try-restart|reload-or-restart)"
+WRITE_RE='(>>?|open\(|\.write|append|rm |mv |cp |rsync|tee ).*(/ext-pool/k8s|messages\.jsonl)|(/ext-pool/k8s|messages\.jsonl).*(>>|["'"'"'][aw]\+?["'"'"']|\.write|append)'
+
+phase=${1:?usage: vm-mig-freeze <phase> [--dry-run|--gate] [--window-end ISO]}; shift
+[[ $phase =~ ^[A-Za-z0-9]+$ ]] || { echo "bad phase" >&2; exit 64; }
+DRY=0; GATE_ONLY=0; WEND=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --dry-run) DRY=1 ;;
+    --gate) GATE_ONLY=1 ;;
+    --window-end) WEND=${2:?}; shift ;;
+    *) echo "unknown arg $1" >&2; exit 64 ;;
+  esac; shift
+done
+if [ $DRY = 1 ]; then D=${VMMIG_DRY_DIR:-$(mktemp -d)}; else D=$VMMIG_ROOT/$phase; fi
+# A second freeze would record the already-frozen state and resume would then never restart what
+# the first freeze stopped. The first recording is authoritative: refuse (resume, then freeze again).
+if [ $DRY = 0 ] && [ $GATE_ONLY = 0 ] && [ -e "$D/timers.sys.active" ]; then
+  log "recording already exists in $D (freeze already applied); refusing. Run vm-mig-resume $phase first"
+  exit 3
+fi
+mkdir -p "$D"
+
+act() { # run, or print in dry-run
+  if [ $DRY = 1 ]; then printf 'WOULD: %s\n' "$*"; else "$@"; fi
+}
+# Fail closed: a listing error (e.g. no user bus) must not look like "no units" (false gate PASS).
+active_timers() { local o; o=$("$@" list-units --type=timer --state=active --no-legend --plain 2>/dev/null) || return 1
+  awk '{print $1}' <<<"$o" | sed '/^$/d' | sort; }
+running_svcs() { local o; o=$("$@" list-units --type=service --state=running --no-legend --plain 2>/dev/null) || return 1
+  awk '{print $1}' <<<"$o" | sed '/^$/d' | sort; }
+sysctl_() { systemctl "$@"; }
+
+prove() { # scope unit -> prints evidence lines, exit 0 if an action is proven
+  local scope=$1 u=$2 frag exec f files=() hits=""
+  if [ "$scope" = user ]; then
+    frag=$(user_systemctl show -p FragmentPath --value "$u" 2>/dev/null)
+    exec=$(user_systemctl show -p ExecStart --value "$u" 2>/dev/null)
+  else
+    frag=$(systemctl show -p FragmentPath --value "$u" 2>/dev/null)
+    exec=$(systemctl show -p ExecStart --value "$u" 2>/dev/null)
+  fi
+  [ -n "$frag" ] && files+=("$frag")
+  for f in $(grep -oE '/[^ ;]+' <<<"$exec" | sort -u); do
+    [ -f "$f" ] && grep -Iq . "$f" 2>/dev/null && files+=("$f")
+  done
+  [ ${#files[@]} -gt 0 ] || return 1
+  hits=$(grep -HnIE "$ACT_RE" "${files[@]}" 2>/dev/null; grep -HnIE "$WRITE_RE" "${files[@]}" 2>/dev/null)
+  [ -n "$hits" ] || return 1
+  printf '%s\n' "$hits" | sort -u | head -20 | sed "s|^|$scope $u |"
+}
+
+gate() {
+  local fail=0 x hold
+  local cur
+  cur=$(active_timers sysctl_) || { log "gate FAIL system timer listing failed"; fail=1; cur="<listing failed>"; }
+  x=$(diff <(printf '%s\n' "$cur" | sed '/^$/d') <(tr ' ' '\n' <<<"$ALLOW_SYSTEM" | sed '/^$/d' | sort))
+  [ -z "$x" ] && log "gate PASS system timers == allowlist" || { log "gate FAIL system timers differ: $(tr '\n' ' ' <<<"$x")"; fail=1; }
+  cur=$(active_timers user_systemctl) || { log "gate FAIL user timer listing failed (user bus?)"; fail=1; cur="<listing failed>"; }
+  x=$(diff <(printf '%s\n' "$cur" | sed '/^$/d') <(tr ' ' '\n' <<<"$ALLOW_USER" | sed '/^$/d' | sort))
+  [ -z "$x" ] && log "gate PASS user timers == allowlist" || { log "gate FAIL user timers differ: $(tr '\n' ' ' <<<"$x")"; fail=1; }
+  x=$(systemctl is-active cron.service anacron.timer 2>/dev/null | grep -cx inactive)
+  [ "$x" = 2 ] && log "gate PASS cron.service anacron.timer inactive" || { log "gate FAIL cron/anacron not both inactive"; fail=1; }
+  if [ -e "$D/agents.found.system" ]; then
+    x=$(comm -12 <(running_svcs sysctl_) <(sort "$D/agents.found.system"))
+    [ -z "$x" ] && log "gate PASS no proven system agent running" || { log "gate FAIL still running: $x"; fail=1; }
+  fi
+  if [ -e "$D/agents.found.user" ]; then
+    x=$(comm -12 <(running_svcs user_systemctl) <(sort "$D/agents.found.user"))
+    [ -z "$x" ] && log "gate PASS no proven user agent running" || { log "gate FAIL still running: $x"; fail=1; }
+  fi
+  hold=$(snap get system refresh.hold 2>/dev/null)
+  if [ -n "$WEND" ] && [ -n "$hold" ] && [ "$(date -d "$hold" +%s 2>/dev/null || echo 0)" -ge "$(date -d "$WEND" +%s)" ]; then
+    log "gate PASS snap refresh.hold=$hold >= window end"
+  else
+    log "gate FAIL snap refresh.hold='${hold:-unset}' (window end '${WEND:-not given}')"; fail=1
+  fi
+  return $fail
+}
+
+if [ $GATE_ONLY = 1 ]; then gate; exit $?; fi
+
+# 1. bus warning
+if [ $DRY = 1 ]; then echo "WOULD: post bus warning: allowlist freeze of all timers, cron and agent daemons ($phase)";
+else bus "vm-mig-freeze $phase: ALLOWLIST FREEZE starting (all timers except allowlist, cron, proven agent daemons, snap hold). Resume with vm-mig-resume $phase."; fi
+
+# 2. record
+systemctl list-timers --all --no-legend > "$D/timers.sys.all" 2>/dev/null
+rec() { "$@" || { log "recording failed ($*); ABORT before any stop"; rm -f "$D/timers.sys.active"; exit 4; }; }
+rec active_timers sysctl_ > "$D/timers.sys.active.tmp"
+rec running_svcs sysctl_ > "$D/svc.sys.running"
+user_systemctl list-timers --all --no-legend > "$D/timers.user.all" 2>/dev/null
+rec active_timers user_systemctl > "$D/timers.user.active"
+rec running_svcs user_systemctl > "$D/svc.user.running"
+systemctl is-active cron.service > "$D/cron.state" 2>/dev/null || :
+mv "$D/timers.sys.active.tmp" "$D/timers.sys.active"   # last: its presence marks a complete recording
+if [ "$(id -u)" = 0 ]; then crontab -u "$VMMIG_USER" -l > "$D/crontab.uid1000" 2>/dev/null || :
+else crontab -l > "$D/crontab.uid1000" 2>/dev/null || :; fi
+snap get system refresh.hold > "$D/snap.hold" 2>/dev/null || :
+log "recorded state in $D"
+
+# 3. cron, all sources (no crontab is edited)
+act systemctl stop cron.service anacron.timer anacron.service
+
+# 4. timers
+comm -23 "$D/timers.sys.active" <(tr ' ' '\n' <<<"$ALLOW_SYSTEM" | sed '/^$/d' | sort) > "$D/stop.sys.timers"
+comm -23 "$D/timers.user.active" <(tr ' ' '\n' <<<"$ALLOW_USER" | sed '/^$/d' | sort) > "$D/stop.user.timers"
+if [ $DRY = 1 ]; then
+  echo "WOULD stop $(wc -l < "$D/stop.sys.timers") system timer(s):"; sed 's/^/  /' "$D/stop.sys.timers"
+  echo "WOULD stop $(wc -l < "$D/stop.user.timers") user timer(s):"; sed 's/^/  /' "$D/stop.user.timers"
+else
+  xargs -r systemctl stop < "$D/stop.sys.timers"
+  # shellcheck disable=SC2046
+  [ -s "$D/stop.user.timers" ] && user_systemctl stop $(cat "$D/stop.user.timers")
+fi
+
+# 5. agent daemons: candidates = named + ExecStart under the code roots; stop only with proof
+: > "$D/agents.found.system"; : > "$D/agents.found.user"; : > "$D/agents.proof"; : > "$D/agents.unproven"; : > "$D/agents.consent"
+for scope in system user; do
+  if [ $scope = user ]; then named=$NAMED_USER; sc=user_systemctl; else named=$NAMED_SYSTEM; sc=sysctl_; fi
+  cands=$( { for u in $named; do grep -qx "$u" "$D/svc.$( [ $scope = user ] && echo user || echo sys).running" && echo "$u"; done
+             while read -r u; do $sc show -p ExecStart --value "$u" 2>/dev/null | grep -qE "$CODE_RE" && echo "$u"; done \
+               < "$D/svc.$( [ $scope = user ] && echo user || echo sys).running"; } | sort -u)
+  for u in $cands; do
+    if [[ $u =~ $CONSENT_ONLY ]]; then echo "$scope $u" >> "$D/agents.consent"; continue; fi
+    [[ $u =~ $EXEMPT ]] && continue
+    if prove "$scope" "$u" >> "$D/agents.proof"; then echo "$u" >> "$D/agents.found.$scope"
+    else echo "$scope $u" >> "$D/agents.unproven"; fi
+  done
+done
+cat "$D/agents.found.system" "$D/agents.found.user" > "$D/agents.found"
+if [ $DRY = 1 ]; then
+  echo "WOULD stop $(wc -l < "$D/agents.found") proven agent daemon(s):"; sed 's/^/  /' "$D/agents.found"
+  echo "kept running (no proof of acting on a migration target):"; sed 's/^/  /' "$D/agents.unproven"
+  echo "never stopped without owner consent:"; sed 's/^/  /' "$D/agents.consent"
+else
+  xargs -r systemctl stop < "$D/agents.found.system"
+  # shellcheck disable=SC2046
+  [ -s "$D/agents.found.user" ] && user_systemctl stop $(cat "$D/agents.found.user")
+fi
+
+# 6. hold all snaps
+act snap refresh --hold=72h
+
+# 7. interactive agents: list only (bracket trick so this script never matches itself)
+pgrep -a -f '[c]laude|[c]ursor|[o]pencode|[z]ed-editor|[c]odex' > "$D/interactive.list" 2>/dev/null || :
+echo "interactive agent processes listed for the owner: $(wc -l < "$D/interactive.list") (see $D/interactive.list)"
+
+if [ $DRY = 1 ]; then echo "dry-run: nothing changed; records in $D"; exit 0; fi
+gate; rc=$?
+[ $rc -eq 0 ] && bus "vm-mig-freeze $phase: freeze gate GREEN" || bus "vm-mig-freeze $phase: freeze gate RED; run vm-mig-resume $phase"
+exit $rc

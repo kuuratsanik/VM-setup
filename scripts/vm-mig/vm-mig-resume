@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# vm-mig-resume <phase> [--dry-run]   restore exactly what vm-mig-freeze recorded (plan §7a), then verify.
+# Units not in the recording are never started; recorded units that no longer exist are logged.
+set -uo pipefail
+. "$(dirname "$(readlink -f "$0")")/vm-mig-lib.sh"
+ALLOW_SYSTEM=${VMMIG_ALLOW_SYSTEM:-"systemd-tmpfiles-clean.timer logrotate.timer"}
+ALLOW_USER=${VMMIG_ALLOW_USER:-""}
+NAMED_USER="house-webhookd.service mcp-bridge.service webmcp-console.service console-http.service"
+NAMED_SYSTEM="ops-bot.service dashboard.service writer.service"
+
+phase=${1:?usage: vm-mig-resume <phase> [--dry-run]}; DRY=0; [ "${2:-}" = --dry-run ] && DRY=1
+[[ $phase =~ ^[A-Za-z0-9]+$ ]] || { echo "bad phase" >&2; exit 64; }
+D=${VMMIG_DRY_DIR:-$VMMIG_ROOT/$phase}
+[ "$DRY" = 1 ] || D=$VMMIG_ROOT/$phase
+[ -s "$D/timers.sys.active" ] || { log "no recording in $D; refusing"; exit 2; }
+
+# Persistent=yes timers whose slot passed during the window fire IMMEDIATELY when started (catch-up).
+# To avoid a thundering herd (zfs-replicate + restic + scrub at once on the SMR disk), timers are
+# started non-persistent first, then persistent ones one by one with a randomized pause of
+# 0..VMMIG_STAGGER seconds (default 30) between them.
+VMMIG_STAGGER=${VMMIG_STAGGER:-30}
+start_each() { # sc file -> start one by one, log failures
+  local sc=$1 f=$2 u n=0 p
+  local -a now=() later=()
+  while read -r u; do
+    [ -n "$u" ] || continue
+    p=no; [[ $u == *.timer ]] && p=$($sc show -p Persistent --value "$u" 2>/dev/null)
+    if [ "$p" = yes ]; then later+=("$u"); else now+=("$u"); fi
+  done < "$f"
+  for u in "${now[@]}" "${later[@]}"; do
+    if [ $DRY = 1 ]; then echo "WOULD start $u"; continue; fi
+    if [[ " ${later[*]} " == *" $u "* ]] && [ "$VMMIG_STAGGER" -gt 0 ]; then sleep $((RANDOM % (VMMIG_STAGGER + 1))); fi
+    $sc start "$u" 2>/dev/null || { log "could not start $u"; n=$((n+1)); echo "$u" >> "$D/resume.start-failed"; }
+  done
+  START_FAILS=$((START_FAILS + n))
+  return 0
+}
+START_FAILS=0; rm -f "$D/resume.start-failed"
+sysctl_() { systemctl "$@"; }
+# Fail closed: a listing error prints a sentinel, so the verify diff can never be empty by accident.
+active_timers() { local o; o=$("$@" list-units --type=timer --state=active --no-legend --plain 2>/dev/null) \
+  || { echo "<listing failed>"; log "timer listing failed ($1)"; return 1; }
+  awk '{print $1}' <<<"$o" | sed '/^$/d' | sort; }
+
+# 1. cron: only if it was active at freeze time
+if [ "$(cat "$D/cron.state" 2>/dev/null)" = active ]; then
+  if [ $DRY = 1 ]; then echo "WOULD start cron.service"; else systemctl start cron.service; fi
+else log "cron.service was not active at freeze; left stopped"; fi
+# 2. timers (anacron.timer only if it was recorded active: it is part of the recording)
+start_each sysctl_ <(comm -23 "$D/timers.sys.active" <(tr ' ' '\n' <<<"$ALLOW_SYSTEM" | sed '/^$/d' | sort))
+start_each user_systemctl <(comm -23 "$D/timers.user.active" <(tr ' ' '\n' <<<"$ALLOW_USER" | sed '/^$/d' | sort))
+# 3. agent daemons that were running at freeze time and were stopped (found + named)
+start_each sysctl_ <(comm -12 "$D/svc.sys.running" <( { cat "$D/agents.found.system" 2>/dev/null; tr ' ' '\n' <<<"$NAMED_SYSTEM"; } | sed '/^$/d' | sort -u))
+start_each user_systemctl <(comm -12 "$D/svc.user.running" <( { cat "$D/agents.found.user" 2>/dev/null; tr ' ' '\n' <<<"$NAMED_USER"; } | sed '/^$/d' | sort -u))
+# 4. snaps: unhold only if there was no hold before; otherwise restore the recorded hold
+if [ -s "$D/snap.hold" ]; then
+  if [ $DRY = 1 ]; then echo "WOULD snap set system refresh.hold=$(cat "$D/snap.hold")"; else snap set system refresh.hold="$(cat "$D/snap.hold")"; fi
+else
+  if [ $DRY = 1 ]; then echo "WOULD snap refresh --unhold"; else snap refresh --unhold; fi
+fi
+[ $DRY = 1 ] && { echo "dry-run: nothing changed"; exit 0; }
+
+# verification
+fail=0
+x=$(diff "$D/timers.sys.active" <(active_timers sysctl_)); [ -z "$x" ] && log "verify PASS system timers == recording" || { log "verify FAIL system timers: $(tr '\n' ' ' <<<"$x")"; fail=1; }
+x=$(diff "$D/timers.user.active" <(active_timers user_systemctl)); [ -z "$x" ] && log "verify PASS user timers == recording" || { log "verify FAIL user timers: $(tr '\n' ' ' <<<"$x")"; fail=1; }
+[ "$START_FAILS" -eq 0 ] && log "verify PASS every recorded unit started" \
+  || { log "verify FAIL $START_FAILS unit(s) did not start: $(tr '\n' ' ' < "$D/resume.start-failed")"; fail=1; }
+# Service diff is part of the verdict: a service that was running at freeze and is not running now is
+# RED unless the operator has explained it by listing it in $D/svc.diff.explained (e.g. a oneshot that
+# finished on its own). Services running now but not at freeze are logged for the window log only.
+running_svcs() { local o; o=$("$@" list-units --type=service --state=running --no-legend --plain 2>/dev/null) \
+  || { echo "<listing failed>"; return 1; }
+  awk '{print $1}' <<<"$o" | sed '/^$/d' | sort; }
+: > "$D/resume.svc.diff"
+for sc in sys user; do
+  if [ $sc = sys ]; then cur=$(running_svcs sysctl_); else cur=$(running_svcs user_systemctl); fi
+  diff "$D/svc.$sc.running" <(printf '%s\n' "$cur" | sed '/^$/d') | sed "s/^/$sc /" >> "$D/resume.svc.diff"
+  missing=$(comm -23 "$D/svc.$sc.running" <(printf '%s\n' "$cur" | sed '/^$/d' | sort) \
+            | comm -23 - <(sort "$D/svc.diff.explained" 2>/dev/null))
+  if [ -z "$missing" ] && [ "$cur" != "<listing failed>" ]; then log "verify PASS $sc services: none missing vs recording"
+  else log "verify FAIL $sc services not running (unexplained): $(tr '\n' ' ' <<<"${missing:-<listing failed>}")"; fail=1; fi
+done
+log "new services since freeze (log only): $(grep -c '^[a-z]* >' "$D/resume.svc.diff") in $D/resume.svc.diff"
+want=$(cat "$D/cron.state" 2>/dev/null || echo active)
+[ "$(systemctl is-active cron.service)" = "$want" ] && log "verify PASS cron $want (as at freeze)" || { log "verify FAIL cron not $want"; fail=1; }
+if [ "$(id -u)" = 0 ]; then cur=$(crontab -u "$VMMIG_USER" -l 2>/dev/null); else cur=$(crontab -l 2>/dev/null); fi
+[ "$cur" = "$(cat "$D/crontab.uid1000")" ] && log "verify PASS crontab unchanged" || { log "verify FAIL crontab differs"; fail=1; }
+# Archive (rename, never delete) a GREEN recording so the next freeze for this phase can record a fresh
+# one ("resume, then freeze" after a reboot). A RED recording stays in place: freeze keeps refusing.
+if [ $fail = 0 ]; then
+  arch=$D.resumed-$(date -u +%Y%m%dT%H%M%SZ); mv "$D" "$arch" && log "recording archived to $arch"; D=$arch
+fi
+bus "AGENTS_RESUMED $phase: verify $([ $fail = 0 ] && echo GREEN || echo RED); service diff in $D/resume.svc.diff"
+exit $fail

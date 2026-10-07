@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# vm-mig-revert <manifest.list>      execute a dead-man revert manifest (plan §7c)
+# vm-mig-revert --validate <file>    vocabulary/arity check only, executes nothing
+#
+# Fixed vocabulary, one action per line, executed in REVERSE order, each idempotent:
+#   ufw-restore <dir> | ufw-delete <rule spec...> | net-destroy <name> | unit-disable <unit>
+#   nft-delete [family] <table> <chain> <handle> | file-restore <src> <dst> | noop-touch <path>
+# An unknown action or wrong arity refuses the WHOLE manifest before anything runs (exit 3).
+# Exits 0 without acting if <U>.confirmed exists. Never touches tailscaled, sshd or NetworkManager.
+# Needs no network; the bus post is best-effort and last.
+set -uo pipefail
+set -f   # manifest words are never globbed
+. "$(dirname "$(readlink -f "$0")")/vm-mig-lib.sh"
+
+# Every external call is time-bounded and runs in the foreground (nothing is detached or backgrounded;
+# rsync's local helper stays in our process tree), so systemd's KillMode=control-group reaps anything
+# a uutils `timeout` might orphan.
+# Every external call is time-bounded (boot unit has TimeoutStartSec=300, ExecStart under timeout 240).
+virsh() { timeout 30 virsh "$@"; }
+ufw() { timeout 60 ufw "$@"; }
+nft() { timeout 30 nft "$@"; }
+systemctl() { timeout 60 systemctl "$@"; }
+rsync() { timeout 60 rsync "$@"; }
+
+FORBIDDEN='tailscale|sshd|ssh\.service|ssh\.socket|NetworkManager|systemd-resolved|blocky'
+
+validate_line() { # act args... -> 0 ok, 1 bad
+  local act=$1; shift
+  case $act in
+    ufw-restore|net-destroy|noop-touch) [ $# -eq 1 ] ;;
+    unit-disable) [ $# -eq 1 ] && ! [[ $1 =~ $FORBIDDEN ]] ;;
+    # full rule text only (as the manifest created it); a numeric index could hit an unrelated rule
+    ufw-delete) [ $# -ge 2 ] && [[ $1 =~ ^(allow|deny|reject|limit|route)$ ]] ;;
+    file-restore) [ $# -eq 2 ] ;;
+    nft-delete) { [ $# -eq 3 ] || [ $# -eq 4 ]; } && [[ ${!#} =~ ^[0-9]+$ ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_file() {
+  local f=$1 n=0 line act rest
+  [ -r "$f" ] || { log "manifest $f not readable"; return 2; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n+1))
+    [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+    read -r act rest <<<"$line"
+    # shellcheck disable=SC2086  # deliberate word split, globbing is off
+    validate_line "$act" $rest || { log "line $n: refused '$line' (unknown action or bad arguments)"; return 3; }
+  done < "$f"
+  return 0
+}
+
+a_ufw_restore() {
+  local d=$1
+  [ -d "$d" ] || { log "ufw-restore: saved copy $d missing"; return 1; }
+  if diff -rq "$d" "$VMMIG_UFW_DIR" >/dev/null 2>&1; then
+    log "ufw-restore: $VMMIG_UFW_DIR equals $d; copy and reload skipped"; return 0
+  fi
+  rsync -a --delete "$d"/ "$VMMIG_UFW_DIR"/ || { log "ufw-restore: rsync failed"; return 1; }
+  ufw reload >/dev/null 2>&1 || { log "ufw-restore: ufw reload failed"; return 1; }
+  log "ufw-restore: restored $VMMIG_UFW_DIR from $d and reloaded"
+}
+
+a_ufw_delete() {
+  local out
+  out=$(ufw --force delete "$@" 2>&1); local rc=$?
+  if grep -qi 'non-existent' <<<"$out"; then log "ufw-delete: '$*' already absent"; return 0; fi
+  [ $rc -eq 0 ] && log "ufw-delete: removed '$*'" || log "ufw-delete: '$*' failed: $out"
+  return $rc
+}
+
+a_net_destroy() {
+  local n=$1 leases d ifs info
+  virsh net-info "$n" >/dev/null 2>&1 || { log "net-destroy: $n not defined; skip"; return 0; }
+  leases=$(virsh net-dhcp-leases "$n" 2>/dev/null | awk 'NR>2 && NF' | wc -l)
+  [ "$leases" -eq 0 ] || { log "net-destroy: REFUSED, $n has $leases DHCP lease(s)"; return 1; }
+  for d in $(virsh list --name --state-running 2>/dev/null); do
+    ifs=$(virsh domiflist "$d" 2>/dev/null | awk 'NR>2{print $3}')   # captured: no SIGPIPE under pipefail
+    if grep -qx "$n" <<<"$ifs"; then
+      log "net-destroy: REFUSED, running domain $d uses $n"; return 1
+    fi
+  done
+  info=$(virsh net-info "$n" 2>/dev/null)
+  if grep -qE '^Active:[[:space:]]+yes' <<<"$info"; then
+    virsh net-destroy "$n" >/dev/null || { log "net-destroy: destroy $n failed"; return 1; }
+  fi
+  virsh net-undefine "$n" >/dev/null || { log "net-destroy: undefine $n failed"; return 1; }
+  log "net-destroy: $n destroyed and undefined"
+}
+
+a_unit_disable() {
+  systemctl disable --now "$1" >/dev/null 2>&1 || { log "unit-disable: $1 failed"; return 1; }
+  log "unit-disable: $1 disabled and stopped"
+}
+
+a_nft_delete() {
+  local fam=ip
+  [ $# -eq 4 ] && { fam=$1; shift; }
+  local t=$1 c=$2 h=$3 chain
+  chain=$(nft -a list chain "$fam" "$t" "$c" 2>/dev/null)   # captured: grep -q in a pipe races SIGPIPE
+  if ! grep -qE "# handle $h\$" <<<"$chain"; then
+    log "nft-delete: $fam $t $c handle $h absent; skip"; return 0
+  fi
+  nft delete rule "$fam" "$t" "$c" handle "$h" || { log "nft-delete: $fam $t $c $h failed"; return 1; }
+  log "nft-delete: removed $fam $t $c handle $h"
+}
+
+a_file_restore() {
+  local s=$1 d=$2
+  [ -e "$s" ] || { log "file-restore: source $s missing"; return 1; }
+  if [ -e "$d" ] && cmp -s "$s" "$d"; then log "file-restore: $d already equals $s; skip"; return 0; fi
+  cp -a "$s" "$d" || { log "file-restore: copy $s -> $d failed"; return 1; }
+  log "file-restore: $d restored from $s"
+}
+
+a_noop_touch() { touch "$1" && log "noop-touch: $1"; }
+
+if [ "${1:-}" = --validate ]; then validate_file "${2:?file}"; exit $?; fi
+M=${1:?usage: vm-mig-revert <manifest.list> | --validate <file>}
+U=$(basename "$M" .list)
+ARMED=$VMMIG_STATE/armed
+mkdir -p "$ARMED"
+exec 9>"$VMMIG_STATE/revert.lock"
+timeout 70 flock -w 60 9 || { log "$U: revert lock busy"; exit 75; }
+
+if [ -e "$ARMED/$U.confirmed" ]; then log "$U: confirmed; nothing to revert"; exit 0; fi
+validate_file "$M"; rc=$?
+[ $rc -eq 0 ] || { bus "vm-mig-revert $U: manifest refused (rc=$rc); nothing executed"; exit $rc; }
+
+mapfile -t L < <(grep -vE '^[[:space:]]*(#|$)' "$M")
+log "$U: reverting ${#L[@]} action(s) in reverse order"
+fail=0
+for ((i=${#L[@]}-1; i>=0; i--)); do
+  read -r act rest <<<"${L[i]}"
+  # shellcheck disable=SC2086
+  case $act in
+    ufw-restore)  a_ufw_restore $rest ;;
+    ufw-delete)   a_ufw_delete $rest ;;
+    net-destroy)  a_net_destroy $rest ;;
+    unit-disable) a_unit_disable $rest ;;
+    nft-delete)   a_nft_delete $rest ;;
+    file-restore) a_file_restore $rest ;;
+    noop-touch)   a_noop_touch $rest ;;
+  esac || fail=1
+done
+
+if [ $fail -eq 0 ]; then
+  rm -f "$ARMED/$U"
+  log "$U: revert complete; marker removed"
+  bus "vm-mig-revert $U: dead-man revert executed (${#L[@]} action(s)), marker removed"
+  exit 0
+fi
+log "$U: revert INCOMPLETE; marker kept so the boot-time revert retries"
+bus "vm-mig-revert $U: revert INCOMPLETE, marker kept; owner attention needed"
+exit 1
